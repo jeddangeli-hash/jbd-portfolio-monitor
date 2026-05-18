@@ -1383,25 +1383,33 @@ with tab_holdings:
                 else:
                     ann5 = ann_fin.tail(5).copy()
                     all_vals = list(ann5["revenue"].dropna())
-                    if "ebitda" in ann5.columns:
-                        all_vals += list(ann5["ebitda"].dropna())
+                    for col in ("ebitda", "net_income"):
+                        if col in ann5.columns:
+                            all_vals += list(ann5[col].dropna())
                     scale, unit = _scale_axis(all_vals)
+                    years_x = [d.year if hasattr(d, "year") else str(d) for d in ann5.index]
                     fig_a = go.Figure()
                     fig_a.add_trace(go.Bar(
-                        name="Revenue",
-                        x=[d.year if hasattr(d, "year") else str(d) for d in ann5.index],
+                        name="Revenue", x=years_x,
                         y=(ann5["revenue"] / scale).values,
                         marker_color="#7c8eff",
-                        text=[f"{v/scale:.1f}" for v in ann5["revenue"]],
+                        text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in ann5["revenue"]],
                         textposition="outside",
                     ))
                     if "ebitda" in ann5.columns:
                         fig_a.add_trace(go.Bar(
-                            name="EBITDA",
-                            x=[d.year if hasattr(d, "year") else str(d) for d in ann5.index],
+                            name="EBITDA", x=years_x,
                             y=(ann5["ebitda"] / scale).values,
                             marker_color="#3ddc97",
                             text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in ann5["ebitda"]],
+                            textposition="outside",
+                        ))
+                    if "net_income" in ann5.columns:
+                        fig_a.add_trace(go.Bar(
+                            name="Net Income", x=years_x,
+                            y=(ann5["net_income"] / scale).values,
+                            marker_color="#f4b942",
+                            text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in ann5["net_income"]],
                             textposition="outside",
                         ))
                     fig_a.update_layout(
@@ -1421,8 +1429,9 @@ with tab_holdings:
                 else:
                     q5 = qtr_fin.tail(5).copy()
                     all_vals = list(q5["revenue"].dropna())
-                    if "ebitda" in q5.columns:
-                        all_vals += list(q5["ebitda"].dropna())
+                    for col in ("ebitda", "net_income"):
+                        if col in q5.columns:
+                            all_vals += list(q5[col].dropna())
                     scale, unit = _scale_axis(all_vals)
                     def _qlabel(d):
                         if hasattr(d, "year") and hasattr(d, "month"):
@@ -1444,6 +1453,14 @@ with tab_holdings:
                             y=(q5["ebitda"] / scale).values,
                             marker_color="#3ddc97",
                             text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in q5["ebitda"]],
+                            textposition="outside",
+                        ))
+                    if "net_income" in q5.columns:
+                        fig_q.add_trace(go.Bar(
+                            name="Net Income", x=labels,
+                            y=(q5["net_income"] / scale).values,
+                            marker_color="#f4b942",
+                            text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in q5["net_income"]],
                             textposition="outside",
                         ))
                     fig_q.update_layout(

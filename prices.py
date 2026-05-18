@@ -187,11 +187,13 @@ def fetch_key_stats(symbol: str) -> dict:
 
 
 def _extract_rev_ebitda(df: pd.DataFrame) -> pd.DataFrame:
-    """Pulls Revenue and EBITDA rows out of a yfinance income-statement DF."""
+    """Pulls Revenue, EBITDA and Net Income rows out of a yfinance income-statement DF."""
     if df is None or df.empty:
         return pd.DataFrame()
     rev_keys = ["Total Revenue", "TotalRevenue", "Revenue", "OperatingRevenue"]
     ebitda_keys = ["EBITDA", "Normalized EBITDA", "NormalizedEBITDA"]
+    ni_keys = ["Net Income", "NetIncome", "Net Income Common Stockholders",
+               "NetIncomeCommonStockholders", "Net Income From Continuing Operation Net Minority Interest"]
     out = pd.DataFrame(index=df.columns)
     for k in rev_keys:
         if k in df.index:
@@ -201,8 +203,11 @@ def _extract_rev_ebitda(df: pd.DataFrame) -> pd.DataFrame:
         if k in df.index:
             out["ebitda"] = df.loc[k]
             break
+    for k in ni_keys:
+        if k in df.index:
+            out["net_income"] = df.loc[k]
+            break
     out = out.sort_index()
-    # Drop rows where everything is NaN
     if out.empty:
         return out
     return out.dropna(how="all")
