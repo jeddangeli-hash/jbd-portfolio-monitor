@@ -137,7 +137,31 @@ def fetch_key_stats(symbol: str) -> dict:
                 info = t.info or {}
             except Exception:
                 info = {}
+
+        # Next earnings date — try calendar first, then info timestamps
+        next_earnings = None
+        try:
+            cal = t.calendar
+            if isinstance(cal, dict):
+                ed = cal.get("Earnings Date")
+                if ed:
+                    next_earnings = ed[0] if isinstance(ed, (list, tuple)) else ed
+            elif cal is not None and hasattr(cal, "index"):
+                if "Earnings Date" in getattr(cal, "index", []):
+                    row = cal.loc["Earnings Date"]
+                    next_earnings = row.iloc[0] if hasattr(row, "iloc") else row
+        except Exception:
+            pass
+        if next_earnings is None:
+            ts = info.get("earningsTimestamp") or info.get("earningsTimestampStart")
+            if ts:
+                try:
+                    next_earnings = pd.Timestamp(ts, unit="s")
+                except Exception:
+                    next_earnings = None
+
         return {
+            "next_earnings": next_earnings,
             "trailing_pe": info.get("trailingPE"),
             "forward_pe": info.get("forwardPE"),
             "peg_ratio": info.get("pegRatio") or info.get("trailingPegRatio"),

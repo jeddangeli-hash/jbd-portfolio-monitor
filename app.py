@@ -1293,17 +1293,38 @@ with tab_holdings:
             target = key.get("target_mean")
             upside = ((target - cur_price) / cur_price * 100) if (target and cur_price) else None
 
-            k1, k2, k3, k4, k5, k6 = st.columns(6)
-            k1.metric("Trailing P/E", _fmt_num(key.get("trailing_pe")))
-            k2.metric("Forward P/E", _fmt_num(key.get("forward_pe")))
-            k3.metric("PEG", _fmt_num(key.get("peg_ratio")))
-            k4.metric("Analyst target",
+            # Format earnings date with days-from-today
+            ne_raw = key.get("next_earnings")
+            ne_str = "—"
+            ne_sub = None
+            if ne_raw is not None:
+                try:
+                    ne_ts = pd.Timestamp(ne_raw)
+                    if hasattr(ne_ts, "tz") and ne_ts.tz is not None:
+                        ne_ts = ne_ts.tz_localize(None)
+                    ne_str = ne_ts.strftime("%Y-%m-%d")
+                    days = (ne_ts.normalize() - pd.Timestamp(today).normalize()).days
+                    if days > 0:
+                        ne_sub = f"in {days}d"
+                    elif days == 0:
+                        ne_sub = "today"
+                    else:
+                        ne_sub = f"{-days}d ago"
+                except Exception:
+                    pass
+
+            k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
+            k1.metric("Next earnings", ne_str, ne_sub)
+            k2.metric("Trailing P/E", _fmt_num(key.get("trailing_pe")))
+            k3.metric("Forward P/E", _fmt_num(key.get("forward_pe")))
+            k4.metric("PEG", _fmt_num(key.get("peg_ratio")))
+            k5.metric("Analyst target",
                       f"${target:.2f}" if target else "—",
                       f"{upside:+.1f}% upside" if upside is not None else None)
-            k5.metric("Recommendation",
+            k6.metric("Recommendation",
                       _rec_label(key.get("recommendation_key"), key.get("recommendation_mean")),
                       help=f"Mean score: {key.get('recommendation_mean'):.2f}" if key.get("recommendation_mean") else None)
-            k6.metric("# Analysts",
+            k7.metric("# Analysts",
                       f"{int(key['n_analysts'])}" if key.get("n_analysts") else "—")
 
             # Analyst target range bar (low / mean / high vs current price)
