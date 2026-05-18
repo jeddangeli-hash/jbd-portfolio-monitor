@@ -138,7 +138,14 @@ def load_tx(path_or_buf) -> pd.DataFrame:
 
 csv_source = uploaded if uploaded is not None else (str(DEFAULT_CSV) if DEFAULT_CSV.exists() else None)
 if csv_source is None:
-    st.error("No CSV found. Upload one in the sidebar or place it at `data/portfolio.csv`.")
+    st.markdown("# 📈 JBD Portfolio Monitor")
+    st.info(
+        "👋 **Welcome!** Upload your Yahoo Finance portfolio CSV from the sidebar to get started.\n\n"
+        "Export from Yahoo Finance → your portfolio → ⋯ menu → **Export Transactions**, "
+        "then drag the file into the **Upload Yahoo Finance CSV** control on the left."
+    )
+    st.caption("Expected columns: Symbol · Trade Date · Purchase Price · Quantity · Transaction Type "
+               "(+ optional Current Price). Common Yahoo column aliases are supported automatically.")
     st.stop()
 
 tx = load_tx(csv_source)
