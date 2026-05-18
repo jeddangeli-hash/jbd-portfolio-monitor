@@ -122,6 +122,102 @@ def fetch_dividends(symbol: str) -> pd.Series:
         return pd.Series(dtype=float)
 
 
+@lru_cache(maxsize=256)
+def fetch_key_stats(symbol: str) -> dict:
+    """Trailing/forward P/E, analyst target price, recommendation, etc."""
+    if not HAS_YF:
+        return {}
+    try:
+        t = yf.Ticker(symbol)
+        info = {}
+        try:
+            info = t.get_info() or {}
+        except Exception:
+            try:
+                info = t.info or {}
+            except Exception:
+                info = {}
+        return {
+            "trailing_pe": info.get("trailingPE"),
+            "forward_pe": info.get("forwardPE"),
+            "peg_ratio": info.get("pegRatio") or info.get("trailingPegRatio"),
+            "target_mean": info.get("targetMeanPrice"),
+            "target_high": info.get("targetHighPrice"),
+            "target_low": info.get("targetLowPrice"),
+            "recommendation_mean": info.get("recommendationMean"),
+            "recommendation_key": info.get("recommendationKey"),
+            "n_analysts": info.get("numberOfAnalystOpinions"),
+            "currency": info.get("currency", "USD"),
+            "market_cap": info.get("marketCap"),
+        }
+    except Exception:
+        return {}
+
+
+def _extract_rev_ebitda(df: pd.DataFrame) -> pd.DataFrame:
+    """Pulls Revenue and EBITDA rows out of a yfinance income-statement DF."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    rev_keys = ["Total Revenue", "TotalRevenue", "Revenue", "OperatingRevenue"]
+    ebitda_keys = ["EBITDA", "Normalized EBITDA", "NormalizedEBITDA"]
+    out = pd.DataFrame(index=df.columns)
+    for k in rev_keys:
+        if k in df.index:
+            out["revenue"] = df.loc[k]
+            break
+    for k in ebitda_keys:
+        if k in df.index:
+            out["ebitda"] = df.loc[k]
+            break
+    out = out.sort_index()
+    # Drop rows where everything is NaN
+    if out.empty:
+        return out
+    return out.dropna(how="all")
+
+
+@lru_cache(maxsize=128)
+def fetch_annual_financials(symbol: str) -> pd.DataFrame:
+    if not HAS_YF:
+        return pd.DataFrame()
+    try:
+        t = yf.Ticker(symbol)
+        df = None
+        try:
+            df = t.income_stmt
+        except Exception:
+            df = None
+        if df is None or df.empty:
+            try:
+                df = t.financials
+            except Exception:
+                df = None
+        return _extract_rev_ebitda(df)
+    except Exception:
+        return pd.DataFrame()
+
+
+@lru_cache(maxsize=128)
+def fetch_quarterly_financials(symbol: str) -> pd.DataFrame:
+    if not HAS_YF:
+        return pd.DataFrame()
+    try:
+        t = yf.Ticker(symbol)
+        df = None
+        try:
+            df = t.quarterly_income_stmt
+        except Exception:
+            df = None
+        if df is None or df.empty:
+            try:
+                df = t.quarterly_financials
+            except Exception:
+                df = None
+        return _extract_rev_ebitda(df)
+    except Exception:
+        return pd.DataFrame()
+
+
 def fetch_benchmark(symbol: str, period: str = "1y") -> pd.Series:
     h = fetch_history(symbol, period=period)
     if h.empty:

@@ -175,6 +175,18 @@ def get_metadata(symbols: tuple[str, ...]) -> pd.DataFrame:
 def get_dividends(symbol: str) -> pd.Series:
     return pr.fetch_dividends(symbol)
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_key_stats(symbol: str) -> dict:
+    return pr.fetch_key_stats(symbol)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_annual_financials(symbol: str) -> pd.DataFrame:
+    return pr.fetch_annual_financials(symbol)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_quarterly_financials(symbol: str) -> pd.DataFrame:
+    return pr.fetch_quarterly_financials(symbol)
+
 symbols = tuple(positions["symbol"].tolist())
 quotes = get_quotes(symbols) if use_live else {}
 price_map = {s: q["price"] for s, q in quotes.items()}
@@ -1199,6 +1211,180 @@ with tab_holdings:
                            help=f"Value today if you'd never sold ({hold_qty:,.0f} shares × "
                                 f"${cur_price:.2f}). The delta shows how much you missed "
                                 f"(positive) or saved (negative) by selling.")
+
+            # ----- Key data ----------------------------------------------------
+            st.markdown("---")
+            st.markdown("##### Key data")
+            with st.spinner("Loading fundamentals…"):
+                key = get_key_stats(selected)
+                ann_fin = get_annual_financials(selected)
+                qtr_fin = get_quarterly_financials(selected)
+
+            def _fmt_num(n):
+                if n is None or pd.isna(n):
+                    return "—"
+                return f"{n:.2f}"
+
+            def _rec_label(key_val, mean_val):
+                if not key_val:
+                    if mean_val is None or pd.isna(mean_val):
+                        return "—"
+                    # Yahoo scale: 1=Strong Buy … 5=Strong Sell
+                    if mean_val < 1.5:
+                        return "Strong Buy"
+                    if mean_val < 2.5:
+                        return "Buy"
+                    if mean_val < 3.5:
+                        return "Hold"
+                    if mean_val < 4.5:
+                        return "Sell"
+                    return "Strong Sell"
+                return str(key_val).replace("_", " ").title()
+
+            target = key.get("target_mean")
+            upside = ((target - cur_price) / cur_price * 100) if (target and cur_price) else None
+
+            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            k1.metric("Trailing P/E", _fmt_num(key.get("trailing_pe")))
+            k2.metric("Forward P/E", _fmt_num(key.get("forward_pe")))
+            k3.metric("PEG", _fmt_num(key.get("peg_ratio")))
+            k4.metric("Analyst target",
+                      f"${target:.2f}" if target else "—",
+                      f"{upside:+.1f}% upside" if upside is not None else None)
+            k5.metric("Recommendation",
+                      _rec_label(key.get("recommendation_key"), key.get("recommendation_mean")),
+                      help=f"Mean score: {key.get('recommendation_mean'):.2f}" if key.get("recommendation_mean") else None)
+            k6.metric("# Analysts",
+                      f"{int(key['n_analysts'])}" if key.get("n_analysts") else "—")
+
+            # Analyst target range bar (low / mean / high vs current price)
+            t_low = key.get("target_low")
+            t_high = key.get("target_high")
+            if all(v is not None and not pd.isna(v) for v in [t_low, target, t_high, cur_price]):
+                fig_t = go.Figure()
+                fig_t.add_trace(go.Scatter(
+                    x=[t_low, t_high], y=[0, 0], mode="lines",
+                    line=dict(color="#3a4258", width=10), name="Analyst range",
+                    showlegend=False, hoverinfo="skip",
+                ))
+                fig_t.add_trace(go.Scatter(
+                    x=[t_low, target, t_high], y=[0, 0, 0],
+                    mode="markers+text",
+                    marker=dict(size=[14, 18, 14],
+                                color=["#7c8eff", "#3ddc97", "#7c8eff"],
+                                line=dict(color="#0e1117", width=2)),
+                    text=[f"Low ${t_low:.2f}", f"Mean ${target:.2f}", f"High ${t_high:.2f}"],
+                    textposition=["bottom center", "top center", "bottom center"],
+                    textfont=dict(color="#e8edf5"),
+                    showlegend=False, hoverinfo="skip",
+                ))
+                fig_t.add_trace(go.Scatter(
+                    x=[cur_price], y=[0], mode="markers+text",
+                    marker=dict(size=16, color="#f4b942", symbol="diamond",
+                                line=dict(color="#0e1117", width=2)),
+                    text=[f"Now ${cur_price:.2f}"], textposition="top center",
+                    textfont=dict(color="#f4b942"), name="Current",
+                    showlegend=False, hoverinfo="skip",
+                ))
+                fig_t.update_layout(
+                    height=130, margin=dict(t=30, b=30, l=30, r=30),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    yaxis=dict(visible=False, range=[-0.6, 0.6]),
+                    xaxis=dict(showgrid=False, zeroline=False,
+                               title="Analyst price targets vs current"),
+                )
+                st.plotly_chart(fig_t, use_container_width=True)
+
+            # Annual & quarterly financials
+            def _scale_axis(values):
+                m = max(abs(v) for v in values if v is not None and not pd.isna(v)) if len(values) else 0
+                if m >= 1e9:
+                    return 1e9, "$B"
+                if m >= 1e6:
+                    return 1e6, "$M"
+                return 1.0, "$"
+
+            ff_col1, ff_col2 = st.columns(2)
+
+            with ff_col1:
+                st.markdown("**Annual revenue & EBITDA (last 5 years)**")
+                if ann_fin.empty or "revenue" not in ann_fin.columns:
+                    st.caption("No annual financial data available for this ticker.")
+                else:
+                    ann5 = ann_fin.tail(5).copy()
+                    all_vals = list(ann5["revenue"].dropna())
+                    if "ebitda" in ann5.columns:
+                        all_vals += list(ann5["ebitda"].dropna())
+                    scale, unit = _scale_axis(all_vals)
+                    fig_a = go.Figure()
+                    fig_a.add_trace(go.Bar(
+                        name="Revenue",
+                        x=[d.year if hasattr(d, "year") else str(d) for d in ann5.index],
+                        y=(ann5["revenue"] / scale).values,
+                        marker_color="#7c8eff",
+                        text=[f"{v/scale:.1f}" for v in ann5["revenue"]],
+                        textposition="outside",
+                    ))
+                    if "ebitda" in ann5.columns:
+                        fig_a.add_trace(go.Bar(
+                            name="EBITDA",
+                            x=[d.year if hasattr(d, "year") else str(d) for d in ann5.index],
+                            y=(ann5["ebitda"] / scale).values,
+                            marker_color="#3ddc97",
+                            text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in ann5["ebitda"]],
+                            textposition="outside",
+                        ))
+                    fig_a.update_layout(
+                        barmode="group", height=320,
+                        margin=dict(t=30, b=10, l=10, r=10),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        yaxis_title=unit,
+                        yaxis=dict(gridcolor="#222"), xaxis=dict(showgrid=False),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    )
+                    st.plotly_chart(fig_a, use_container_width=True)
+
+            with ff_col2:
+                st.markdown("**Quarterly revenue & EBITDA (last 5 quarters)**")
+                if qtr_fin.empty or "revenue" not in qtr_fin.columns:
+                    st.caption("No quarterly financial data available for this ticker.")
+                else:
+                    q5 = qtr_fin.tail(5).copy()
+                    all_vals = list(q5["revenue"].dropna())
+                    if "ebitda" in q5.columns:
+                        all_vals += list(q5["ebitda"].dropna())
+                    scale, unit = _scale_axis(all_vals)
+                    def _qlabel(d):
+                        if hasattr(d, "year") and hasattr(d, "month"):
+                            q = (d.month - 1) // 3 + 1
+                            return f"Q{q} {d.year}"
+                        return str(d)
+                    labels = [_qlabel(d) for d in q5.index]
+                    fig_q = go.Figure()
+                    fig_q.add_trace(go.Bar(
+                        name="Revenue", x=labels,
+                        y=(q5["revenue"] / scale).values,
+                        marker_color="#7c8eff",
+                        text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in q5["revenue"]],
+                        textposition="outside",
+                    ))
+                    if "ebitda" in q5.columns:
+                        fig_q.add_trace(go.Bar(
+                            name="EBITDA", x=labels,
+                            y=(q5["ebitda"] / scale).values,
+                            marker_color="#3ddc97",
+                            text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in q5["ebitda"]],
+                            textposition="outside",
+                        ))
+                    fig_q.update_layout(
+                        barmode="group", height=320,
+                        margin=dict(t=30, b=10, l=10, r=10),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        yaxis_title=unit,
+                        yaxis=dict(gridcolor="#222"), xaxis=dict(showgrid=False),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    )
+                    st.plotly_chart(fig_q, use_container_width=True)
 
             if h.empty:
                 st.info(f"No price history available for {selected}.")
