@@ -1175,6 +1175,55 @@ with tab_holdings:
             # If closed, override avg-cost display with lifetime avg buy
             avg_cost_show = (cur_inv / cur_qty) if cur_qty > 1e-6 else avg_buy_lifetime
 
+            # Company description (yfinance fundamentals — same fetch reused below)
+            key_top = get_key_stats(selected)
+            company_name = key_top.get("long_name") or selected
+            sector = key_top.get("sector") or "—"
+            industry = key_top.get("industry") or "—"
+            country = key_top.get("country") or "—"
+            website = key_top.get("website")
+            employees = key_top.get("employees")
+            mcap = key_top.get("market_cap")
+            summary = key_top.get("summary")
+
+            def _fmt_mcap(m):
+                if not m:
+                    return None
+                if m >= 1e12:
+                    return f"${m/1e12:.2f}T"
+                if m >= 1e9:
+                    return f"${m/1e9:.2f}B"
+                if m >= 1e6:
+                    return f"${m/1e6:.1f}M"
+                return f"${m:,.0f}"
+
+            badge_parts = [f"**{sector}**"]
+            if industry and industry != "—":
+                badge_parts.append(industry)
+            if country and country != "—":
+                badge_parts.append(country)
+            if employees:
+                badge_parts.append(f"{int(employees):,} employees")
+            mcap_str = _fmt_mcap(mcap)
+            if mcap_str:
+                badge_parts.append(f"mkt cap {mcap_str}")
+
+            head_col1, head_col2 = st.columns([3, 1])
+            with head_col1:
+                st.markdown(f"### {company_name} ({selected})")
+                st.caption(" · ".join(badge_parts))
+            with head_col2:
+                if website:
+                    st.markdown(f"🔗 [Website]({website})")
+
+            if summary:
+                with st.expander("About the company", expanded=True):
+                    st.write(summary)
+            else:
+                st.caption("ℹ️ No company description available for this ticker.")
+
+            st.markdown("---")
+
             sk1, sk2, sk3, sk4, sk5, sk6, sk7 = st.columns(7)
             sk1.metric("Qty", f"{cur_qty:,.2f}")
             sk2.metric("Avg cost", f"${avg_cost_show:.2f}" if avg_cost_show is not None else "—")

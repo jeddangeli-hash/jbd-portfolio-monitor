@@ -149,6 +149,14 @@ def fetch_key_stats(symbol: str) -> dict:
             "n_analysts": info.get("numberOfAnalystOpinions"),
             "currency": info.get("currency", "USD"),
             "market_cap": info.get("marketCap"),
+            "long_name": info.get("longName") or info.get("shortName"),
+            "summary": info.get("longBusinessSummary"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "country": info.get("country"),
+            "website": info.get("website"),
+            "employees": info.get("fullTimeEmployees"),
+            "city": info.get("city"),
         }
     except Exception:
         return {}
