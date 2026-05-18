@@ -1393,7 +1393,7 @@ with tab_holdings:
                         name="Revenue", x=years_x,
                         y=(ann5["revenue"] / scale).values,
                         marker_color="#7c8eff",
-                        text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in ann5["revenue"]],
+                        text=[f"{v/scale:.2f}" if pd.notna(v) else "" for v in ann5["revenue"]],
                         textposition="outside",
                     ))
                     if "ebitda" in ann5.columns:
@@ -1401,7 +1401,7 @@ with tab_holdings:
                             name="EBITDA", x=years_x,
                             y=(ann5["ebitda"] / scale).values,
                             marker_color="#3ddc97",
-                            text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in ann5["ebitda"]],
+                            text=[f"{v/scale:.2f}" if pd.notna(v) else "" for v in ann5["ebitda"]],
                             textposition="outside",
                         ))
                     if "net_income" in ann5.columns:
@@ -1409,7 +1409,7 @@ with tab_holdings:
                             name="Net Income", x=years_x,
                             y=(ann5["net_income"] / scale).values,
                             marker_color="#f4b942",
-                            text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in ann5["net_income"]],
+                            text=[f"{v/scale:.2f}" if pd.notna(v) else "" for v in ann5["net_income"]],
                             textposition="outside",
                         ))
                     fig_a.update_layout(
@@ -1444,7 +1444,7 @@ with tab_holdings:
                         name="Revenue", x=labels,
                         y=(q5["revenue"] / scale).values,
                         marker_color="#7c8eff",
-                        text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in q5["revenue"]],
+                        text=[f"{v/scale:.2f}" if pd.notna(v) else "" for v in q5["revenue"]],
                         textposition="outside",
                     ))
                     if "ebitda" in q5.columns:
@@ -1452,7 +1452,7 @@ with tab_holdings:
                             name="EBITDA", x=labels,
                             y=(q5["ebitda"] / scale).values,
                             marker_color="#3ddc97",
-                            text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in q5["ebitda"]],
+                            text=[f"{v/scale:.2f}" if pd.notna(v) else "" for v in q5["ebitda"]],
                             textposition="outside",
                         ))
                     if "net_income" in q5.columns:
@@ -1460,7 +1460,7 @@ with tab_holdings:
                             name="Net Income", x=labels,
                             y=(q5["net_income"] / scale).values,
                             marker_color="#f4b942",
-                            text=[f"{v/scale:.1f}" if pd.notna(v) else "" for v in q5["net_income"]],
+                            text=[f"{v/scale:.2f}" if pd.notna(v) else "" for v in q5["net_income"]],
                             textposition="outside",
                         ))
                     fig_q.update_layout(
