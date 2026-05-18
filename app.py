@@ -929,19 +929,30 @@ with tab_perf:
                           legend=dict(orientation="h", yanchor="bottom", y=1.02))
         st.plotly_chart(fig, use_container_width=True)
 
-        # Equity curve ($)
+        # Equity curve ($) — market value vs net capital invested
         st.subheader("Equity curve ($)")
+        st.caption("Blue = market value of holdings. Amber = cumulative net cash invested "
+                   "(buys − sells). Gap between them = mark-to-market total P&L.")
+        cum_capital_curve = cf_series.cumsum()
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(
             x=value_series.index, y=value_series.values, mode="lines",
             line=dict(color="#7c8eff", width=2),
             fill="tozeroy", fillcolor="rgba(124,142,255,0.08)",
             name="Market value",
+            hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra>Market value</extra>",
         ))
-        fig2.update_layout(height=320, margin=dict(t=10, b=10, l=10, r=10),
+        fig2.add_trace(go.Scatter(
+            x=cum_capital_curve.index, y=cum_capital_curve.values, mode="lines",
+            line=dict(color="#f4b942", width=2, dash="dot"),
+            name="Net capital invested",
+            hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra>Net capital</extra>",
+        ))
+        fig2.update_layout(height=360, margin=dict(t=10, b=10, l=10, r=10),
                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                            yaxis_title="$", xaxis=dict(showgrid=False),
-                           yaxis=dict(gridcolor="#222"))
+                           yaxis=dict(gridcolor="#222"),
+                           legend=dict(orientation="h", yanchor="bottom", y=1.02))
         st.plotly_chart(fig2, use_container_width=True)
 
         # Cumulative absolute $ P&L over time
