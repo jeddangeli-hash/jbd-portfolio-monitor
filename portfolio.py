@@ -130,6 +130,48 @@ def fifo_match(transactions: Iterable[dict]) -> tuple[list[Lot], float, float]:
     return open_lots, realized, invested
 
 
+def realized_events(transactions_df: pd.DataFrame) -> pd.DataFrame:
+    """FIFO-match SELLs against prior BUYs, one row per SELL with its realized P&L.
+
+    Same oldest-lot-first matching as fifo_match, but records the sell date so
+    realized gains can be attributed to a tax year. Returns a DataFrame with
+    columns: sell_date (date), symbol (str), realized_pnl (float).
+
+    Short positions (a SELL whose quantity exceeds the open lots) are handled
+    exactly like fifo_match: the uncovered quantity is skipped — no synthetic
+    cost basis is invented, so it contributes 0 realized. The skipped share
+    count per symbol is recorded in the returned frame's .attrs["short_skipped"]
+    so callers can surface it to the user.
+    """
+    rows = []
+    short_skipped: dict[str, float] = {}
+    for symbol, grp in transactions_df.groupby("symbol"):
+        grp = grp.sort_values("trade_date")
+        open_lots: list[Lot] = []
+        for _, t in grp.iterrows():
+            td = t["trade_date"].date() if hasattr(t["trade_date"], "date") else t["trade_date"]
+            if t["side"] == "BUY":
+                open_lots.append(Lot(td, float(t["qty"]), float(t["price"])))
+            else:  # SELL
+                remaining = float(t["qty"])
+                sell_price = float(t["price"])
+                realized = 0.0
+                while remaining > 1e-9 and open_lots:
+                    lot = open_lots[0]
+                    take = min(lot.qty, remaining)
+                    realized += take * (sell_price - lot.price)
+                    lot.qty -= take
+                    remaining -= take
+                    if lot.qty <= 1e-9:
+                        open_lots.pop(0)
+                if remaining > 1e-9:
+                    short_skipped[symbol] = short_skipped.get(symbol, 0.0) + remaining
+                rows.append({"sell_date": td, "symbol": symbol, "realized_pnl": realized})
+    df = pd.DataFrame(rows, columns=["sell_date", "symbol", "realized_pnl"])
+    df.attrs["short_skipped"] = short_skipped
+    return df
+
+
 # ----- Position aggregation --------------------------------------------------
 
 def build_positions(tx: pd.DataFrame) -> pd.DataFrame:

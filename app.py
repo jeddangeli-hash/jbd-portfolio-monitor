@@ -15,6 +15,7 @@ import streamlit as st
 import portfolio as pf
 import prices as pr
 import metrics as mt
+import tax
 
 # ---------- Page config ------------------------------------------------------
 
@@ -280,11 +281,11 @@ if not hist.empty:
 
 # ---------- Tabs -------------------------------------------------------------
 
-(tab_overview, tab_recap, tab_today, tab_pos, tab_perf, tab_daily, tab_holdings,
- tab_alloc, tab_risk, tab_div, tab_weekly, tab_lots) = st.tabs([
-    "🎯 Overview", "📑 Recap", "📈 Today", "📋 Positions", "📊 Performance",
-    "📅 Daily", "🏷 Holdings", "🗂 Allocation", "⚠️ Risk", "💰 Dividends",
-    "📆 Weekly", "🧾 Lots"
+(tab_overview, tab_recap, tab_posttax, tab_today, tab_pos, tab_perf, tab_daily,
+ tab_holdings, tab_alloc, tab_risk, tab_div, tab_weekly, tab_lots) = st.tabs([
+    "🎯 Overview", "📑 Recap", "🧮 Post-tax", "📈 Today", "📋 Positions",
+    "📊 Performance", "📅 Daily", "🏷 Holdings", "🗂 Allocation", "⚠️ Risk",
+    "💰 Dividends", "📆 Weekly", "🧾 Lots"
 ])
 
 # ---------- Overview ---------------------------------------------------------
@@ -610,6 +611,129 @@ with tab_recap:
                 "total_pnl": st.column_config.NumberColumn("Total", format="$%.0f"),
             },
         )
+
+# ---------- Post-tax (Italian capital-gain simulator) -----------------------
+
+with tab_posttax:
+    st.subheader("Italian capital-gain tax simulator")
+    st.info(
+        "⚠️ Simulatore semplificato per uso personale. Non sostituisce "
+        "il Quadro RT della dichiarazione dei redditi.\n\n"
+        "Aliquota: 26% sui capital gain non qualificati (regime ordinario).\n\n"
+        "Compensazione minusvalenze: questo simulatore le riporta a vita; "
+        "il regime italiano reale ha limite di 4 anni fiscali."
+    )
+
+    # Per-tab input (kept in the tab body, not the sidebar: Streamlit renders all
+    # tabs together and does not expose the active tab to the sidebar).
+    prior_loss = st.number_input(
+        "Minusvalenze pregresse non riassorbite (€)",
+        min_value=0.0, value=0.0, step=100.0,
+        help="Inserisci eventuali minusvalenze realizzate in anni precedenti "
+             "non coperte dal CSV.",
+    )
+
+    realized_by_year = tax.compute_realized_pnl_by_year(tx)
+    short_skipped = realized_by_year.attrs.get("short_skipped", {})
+    post_tax = tax.compute_post_tax_table(realized_by_year, initial_carryforward=prior_loss)
+
+    if short_skipped:
+        detail = ", ".join(f"{s}: {q:,.0f} sh" for s, q in short_skipped.items())
+        st.warning(
+            f"⚠️ Short positions skipped in realized P&L (sells exceeding buys): {detail}. "
+            "These shares have no cost basis and are excluded — same convention as the "
+            "rest of the app."
+        )
+
+    if post_tax.empty:
+        st.info("No realized sales found in the transactions — nothing to tax yet.")
+    else:
+        total_realized_net = float(post_tax["net"].sum())
+        total_imposta = float(post_tax["imposta"].sum())
+        total_post_tax = float(post_tax["net_post_tax"].sum())
+        carry_residuo = float(post_tax["carryforward_uscente"].iloc[-1])
+
+        pc1, pc2, pc3, pc4 = st.columns(4)
+        pc1.metric("Realized lordo (pre-tax)", f"€{total_realized_net:,.0f}",
+                   help="Somma dei net realizzati per anno (gain + loss), prima delle imposte.")
+        pc2.metric("Imposta dovuta", f"€{total_imposta:,.0f}",
+                   help="Somma delle imposte annue (26% sulla base imponibile dopo compensazione).")
+        pc3.metric("Post-tax", f"€{total_post_tax:,.0f}",
+                   help="Realized netto meno imposta.")
+        pc4.metric("Carryforward residuo", f"€{carry_residuo:,.0f}",
+                   help="Minusvalenze non ancora compensate, riportabili agli anni successivi "
+                        "(valore ≤ 0).")
+
+        st.markdown("##### Anno per anno")
+        show_pt = post_tax.rename(columns={
+            "year": "Anno", "gain_lordo": "Gain lordo", "loss_lordo": "Loss lordo",
+            "net": "Net", "carryforward_entrante": "Carry entrante",
+            "net_compensato": "Net compensato", "imposta": "Imposta",
+            "net_post_tax": "Net post-tax", "carryforward_uscente": "Carry uscente",
+        })
+        st.dataframe(
+            show_pt, use_container_width=True, hide_index=True,
+            column_config={
+                "Anno": st.column_config.NumberColumn(format="%d"),
+                "Gain lordo": st.column_config.NumberColumn(format="€%.0f"),
+                "Loss lordo": st.column_config.NumberColumn(format="€%.0f"),
+                "Net": st.column_config.NumberColumn(format="€%.0f"),
+                "Carry entrante": st.column_config.NumberColumn(format="€%.0f"),
+                "Net compensato": st.column_config.NumberColumn(format="€%.0f"),
+                "Imposta": st.column_config.NumberColumn(format="€%.0f"),
+                "Net post-tax": st.column_config.NumberColumn(format="€%.0f"),
+                "Carry uscente": st.column_config.NumberColumn(format="€%.0f"),
+            },
+        )
+
+        # ----- Dual equity curve: pre-tax (cumulative Total P&L) vs post-tax -----
+        st.subheader("Equity curve: pre-tax vs post-tax")
+        if value_series.empty:
+            st.caption("⚠️ Need yfinance + price history to draw the equity curve. "
+                       "The table above is independent of price history.")
+        else:
+            cum_dep = cf_series.cumsum()
+            pretax_curve = value_series - cum_dep  # cumulative mark-to-market P&L
+
+            # Cumulative tax as a step function: year Y's tax lands at Y-12-31.
+            imposta_by_year = post_tax.set_index("year")["imposta"].to_dict()
+
+            def _cum_tax_at(d):
+                total = 0.0
+                for y, imp in imposta_by_year.items():
+                    if d.year > y or (d.year == y and (d.month, d.day) >= (12, 31)):
+                        total += imp
+                return total
+
+            cum_tax = pd.Series(
+                [_cum_tax_at(ts.date() if hasattr(ts, "date") else ts)
+                 for ts in pretax_curve.index],
+                index=pretax_curve.index,
+            )
+            posttax_curve = pretax_curve - cum_tax
+
+            fig_pt = go.Figure()
+            fig_pt.add_trace(go.Scatter(
+                x=pretax_curve.index, y=pretax_curve.values, mode="lines",
+                line=dict(color="#7c8eff", width=2), name="Pre-tax",
+                hovertemplate="%{x|%Y-%m-%d}<br>€%{y:,.0f}<extra>Pre-tax</extra>",
+            ))
+            fig_pt.add_trace(go.Scatter(
+                x=posttax_curve.index, y=posttax_curve.values, mode="lines",
+                line=dict(color="#3ddc97", width=2), name="Post-tax",
+                hovertemplate="%{x|%Y-%m-%d}<br>€%{y:,.0f}<extra>Post-tax</extra>",
+            ))
+            fig_pt.add_hline(y=0, line_dash="dash", line_color="#666")
+            fig_pt.update_layout(height=380, margin=dict(t=10, b=10, l=10, r=10),
+                                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                 yaxis_title="€ cumulative P&L", xaxis=dict(showgrid=False),
+                                 yaxis=dict(gridcolor="#222", zerolinecolor="#666"),
+                                 legend=dict(orientation="h", yanchor="bottom", y=1.02))
+            st.plotly_chart(fig_pt, use_container_width=True)
+            st.caption("Pre-tax = cumulative mark-to-market P&L (market value − net cash invested). "
+                       "Post-tax subtracts cumulative tax as a step at each 31 Dec. "
+                       "Approximation: the tax applies to realized gains only, here overlaid as an "
+                       "annual step onto a mark-to-market curve.")
 
 # ---------- Today (per-stock day move) --------------------------------------
 
