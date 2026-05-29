@@ -7,3 +7,7 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Dati personali
+data/*.csv
+data/*.json
