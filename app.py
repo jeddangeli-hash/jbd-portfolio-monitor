@@ -544,12 +544,27 @@ with tab_recap:
                   help=f"{(positions['unrealized_pnl'] < 0).sum()} losing open positions")
         un.metric("Net unrealized", f"${net_unr:,.0f}")
 
+    # Aggregate TROIC = Σ lifetime value / Σ lifetime invested − 1 (across ALL
+    # symbols ever traded, incl. closed). Single source of truth: lifetime_stats.
+    if not lifetime_stats.empty:
+        troic_value_total = float(lifetime_stats["total_value_lifetime"].sum())
+        troic_cost_total = float(lifetime_stats["total_invested_lifetime"].sum())
+        agg_troic = (troic_value_total / troic_cost_total - 1.0) if troic_cost_total > 0 else None
+    else:
+        agg_troic = None
+
     st.markdown("---")
-    t1, t2, t3 = st.columns(3)
+    t1, t2, t3, t4 = st.columns(4)
     t1.metric("Total P&L", f"${total_pnl_recap:,.0f}",
               help="Net realized + Net unrealized")
     t2.metric("Return on deployed capital", f"{return_on_deployed:+.2f}%")
-    t3.metric("Portfolio XIRR", f"{port_xirr*100:.2f}%" if port_xirr else "—",
+    t3.metric("TROIC", f"{agg_troic*100:+.2f}%" if agg_troic is not None else "—",
+              help="Total Return on Invested Capital. Per ogni € speso comprando shares "
+                   "nella vita del portfolio (anche su posizioni poi chiuse), quanto vale "
+                   "oggi tra valore di mercato aperte + cassa rientrata dalle vendite. "
+                   "Diverso da Return on Deployed: TROIC misura il moltiplicatore sui "
+                   "soldi investiti TOTALI, non sul net cash attualmente esposto.")
+    t4.metric("Portfolio XIRR", f"{port_xirr*100:.2f}%" if port_xirr else "—",
               help="Money-weighted annualized return")
 
     st.subheader("Gain / loss breakdown (visual)")
