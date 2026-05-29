@@ -201,6 +201,11 @@ positions["day_change_%"] = ((positions["current_price"] - positions["prev_close
 # Enrich all_positions too (closed positions have qty=0 → mkt_value=0, unrealized=0).
 all_positions = pf.enrich_with_prices(all_positions, price_map)
 
+# Lifetime cost/value stats — single source of truth for the Positions &
+# Holdings tabs and the TROIC features. Built from all_positions (incl. closed)
+# so every symbol ever traded is covered.
+lifetime_stats = pf.build_lifetime_stats(all_positions, tx)
+
 # ---------- Top KPIs ---------------------------------------------------------
 
 today = date.today()
@@ -670,28 +675,17 @@ with tab_pos:
     if base.empty:
         st.info("No positions in this category.")
     else:
-        # ----- Lifetime stats per symbol (for closed-position metrics & since-sale columns)
-        lifetime = {}
-        for sym, grp in tx.groupby("symbol"):
-            buys = grp[grp["side"] == "BUY"]
-            sells = grp[grp["side"] == "SELL"]
-            tb_qty = float(buys["qty"].sum())
-            ts_qty = float(sells["qty"].sum())
-            lifetime[sym] = {
-                "avg_buy": float((buys["qty"] * buys["price"]).sum() / tb_qty) if tb_qty > 0 else None,
-                "avg_sell": float((sells["qty"] * sells["price"]).sum() / ts_qty) if ts_qty > 0 else None,
-                "gross_buys": float((buys["qty"] * buys["price"]).sum()),
-                "total_sell_qty": ts_qty,
-            }
+        # ----- Lifetime stats per symbol (single source of truth: build_lifetime_stats)
+        ls = lifetime_stats
 
         base["status"] = base["qty"].apply(lambda q: "Open" if q > 1e-6 else "Closed")
         live_day = positions.set_index("symbol")["day_change_%"].to_dict()
         base["day_change_%"] = base["symbol"].map(live_day)
 
-        base["avg_buy_lifetime"] = base["symbol"].map(lambda s: lifetime.get(s, {}).get("avg_buy"))
-        base["avg_sale_price"] = base["symbol"].map(lambda s: lifetime.get(s, {}).get("avg_sell"))
-        base["total_sell_qty"] = base["symbol"].map(lambda s: lifetime.get(s, {}).get("total_sell_qty") or 0.0)
-        base["gross_buys"] = base["symbol"].map(lambda s: lifetime.get(s, {}).get("gross_buys") or 0.0)
+        base["avg_buy_lifetime"] = base["symbol"].map(ls["avg_buy_lifetime"])
+        base["avg_sale_price"] = base["symbol"].map(ls["avg_sale_lifetime"])
+        base["total_sell_qty"] = base["symbol"].map(ls["gross_sells_qty"]).fillna(0.0)
+        base["gross_buys"] = base["symbol"].map(ls["total_invested_lifetime"]).fillna(0.0)
 
         # Display: for closed positions, show lifetime avg buy as "Avg Cost" and
         # realized / gross_buys as "Return %". For open, keep existing semantics.
@@ -1161,16 +1155,15 @@ with tab_holdings:
 
             gain_pct = (unreal / cur_inv * 100) if cur_inv > 1e-6 else 0.0
             total_pnl_sym = unreal + cur_real
-            # Lifetime stats for this symbol
-            sym_buys = sym_tx[sym_tx["side"] == "BUY"]
-            sym_sells = sym_tx[sym_tx["side"] == "SELL"]
-            total_buy_qty = float(sym_buys["qty"].sum())
-            total_sell_qty = float(sym_sells["qty"].sum())
-            avg_buy_lifetime = (float((sym_buys["qty"] * sym_buys["price"]).sum() / total_buy_qty)
-                                if total_buy_qty > 0 else None)
-            avg_sale_price = (float((sym_sells["qty"] * sym_sells["price"]).sum() / total_sell_qty)
-                              if total_sell_qty > 0 else None)
-            gross_buys = float((sym_buys["qty"] * sym_buys["price"]).sum())
+            # Lifetime stats for this symbol (single source of truth)
+            _ls = lifetime_stats.loc[selected] if selected in lifetime_stats.index else None
+            total_buy_qty = float(_ls["gross_buys_qty"]) if _ls is not None else 0.0
+            total_sell_qty = float(_ls["gross_sells_qty"]) if _ls is not None else 0.0
+            avg_buy_lifetime = (float(_ls["avg_buy_lifetime"])
+                                if _ls is not None and pd.notna(_ls["avg_buy_lifetime"]) else None)
+            avg_sale_price = (float(_ls["avg_sale_lifetime"])
+                              if _ls is not None and pd.notna(_ls["avg_sale_lifetime"]) else None)
+            gross_buys = float(_ls["total_invested_lifetime"]) if _ls is not None else 0.0
 
             # If closed, override avg-cost display with lifetime avg buy
             avg_cost_show = (cur_inv / cur_qty) if cur_qty > 1e-6 else avg_buy_lifetime

@@ -170,6 +170,70 @@ def enrich_with_prices(positions: pd.DataFrame, price_map: dict[str, float]) -> 
     return df
 
 
+# ----- Lifetime cost / value -------------------------------------------------
+
+def build_lifetime_stats(positions_df: pd.DataFrame, transactions_df: pd.DataFrame) -> pd.DataFrame:
+    """Per-symbol lifetime cost/value stats across the whole transaction history.
+
+    Single source of truth for the lifetime accounting that the Positions and
+    Holdings tabs (and the TROIC features) need. Pass the full, price-enriched
+    positions frame (incl. closed positions at qty=0) so every symbol ever
+    traded is covered.
+
+    Columns (indexed by symbol):
+        gross_buys_qty           Σ qty over all BUYs
+        gross_sells_qty          Σ qty over all SELLs
+        avg_buy_lifetime         qty-weighted avg BUY price (None if no buys)
+        avg_sale_lifetime        qty-weighted avg SELL price (None if no sells)
+        total_invested_lifetime  Σ (qty·price) over all BUYs
+        total_returned_lifetime  Σ (qty·price) over all SELLs
+        current_market_value     open qty × current price (from positions_df; 0 if closed)
+        total_value_lifetime     current_market_value + total_returned_lifetime
+        troic                    total_value_lifetime / total_invested_lifetime − 1
+                                 (None if total_invested_lifetime == 0)
+
+    No FX conversion — values are summed as-is, matching the rest of the app.
+    Short positions (SELLs exceeding BUYs) are not special-cased here; the
+    lifetime averages simply reflect the raw transaction quantities.
+    """
+    mv_map = (positions_df.set_index("symbol")["market_value"].to_dict()
+              if "market_value" in positions_df.columns else {})
+    rows = []
+    for sym, grp in transactions_df.groupby("symbol"):
+        buys = grp[grp["side"] == "BUY"]
+        sells = grp[grp["side"] == "SELL"]
+        gross_buys_qty = float(buys["qty"].sum())
+        gross_sells_qty = float(sells["qty"].sum())
+        # buy_cost == gross_buys_qty * avg_buy_lifetime, computed directly to
+        # avoid floating-point drift from the round-trip multiply/divide.
+        buy_cost = float((buys["qty"] * buys["price"]).sum())
+        sell_proceeds = float((sells["qty"] * sells["price"]).sum())
+        avg_buy_lifetime = (buy_cost / gross_buys_qty) if gross_buys_qty > 0 else None
+        avg_sale_lifetime = (sell_proceeds / gross_sells_qty) if gross_sells_qty > 0 else None
+
+        mv = mv_map.get(sym)
+        current_market_value = float(mv) if mv is not None and not pd.isna(mv) else 0.0
+        total_value_lifetime = current_market_value + sell_proceeds
+        troic = (total_value_lifetime / buy_cost - 1.0) if buy_cost > 0 else None
+
+        rows.append({
+            "symbol": sym,
+            "gross_buys_qty": gross_buys_qty,
+            "gross_sells_qty": gross_sells_qty,
+            "avg_buy_lifetime": avg_buy_lifetime,
+            "avg_sale_lifetime": avg_sale_lifetime,
+            "total_invested_lifetime": buy_cost,
+            "total_returned_lifetime": sell_proceeds,
+            "current_market_value": current_market_value,
+            "total_value_lifetime": total_value_lifetime,
+            "troic": troic,
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    return df.set_index("symbol")
+
+
 # ----- XIRR ------------------------------------------------------------------
 
 def xnpv(rate: float, cashflows: list[tuple[date, float]]) -> float:
