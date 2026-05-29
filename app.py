@@ -687,6 +687,11 @@ with tab_pos:
         base["total_sell_qty"] = base["symbol"].map(ls["gross_sells_qty"]).fillna(0.0)
         base["gross_buys"] = base["symbol"].map(ls["total_invested_lifetime"]).fillna(0.0)
 
+        # Lifetime performance columns (Feature 2): Total Cost / Total Value / TROIC %
+        base["total_cost"] = base["symbol"].map(ls["total_invested_lifetime"]).fillna(0.0)
+        base["total_value"] = base["symbol"].map(ls["total_value_lifetime"]).fillna(0.0)
+        base["troic_pct"] = base["symbol"].map(ls["troic"]) * 100.0
+
         # Display: for closed positions, show lifetime avg buy as "Avg Cost" and
         # realized / gross_buys as "Return %". For open, keep existing semantics.
         base["avg_cost_display"] = base.apply(
@@ -738,7 +743,8 @@ with tab_pos:
         display = base[[
             "symbol", "status", "qty", "avg_cost_display", "current_price", "market_value",
             "day_change_%", "unrealized_pnl", "realized_pnl", "total_pnl",
-            "return_pct_display", "avg_sale_price", "dollar_since_sale", "pct_since_sale",
+            "return_pct_display", "total_cost", "total_value", "troic_pct",
+            "avg_sale_price", "dollar_since_sale", "pct_since_sale",
             "xirr_pct", "first_buy"
         ]].rename(columns={
             "symbol": "Symbol", "status": "Status",
@@ -747,6 +753,9 @@ with tab_pos:
             "day_change_%": "Day %", "unrealized_pnl": "Unrlzd P&L",
             "realized_pnl": "Rlzd P&L", "total_pnl": "Total P&L",
             "return_pct_display": "Return %",
+            "total_cost": "Total Cost",
+            "total_value": "Total Value",
+            "troic_pct": "TROIC %",
             "avg_sale_price": "Avg Sale Price",
             "dollar_since_sale": "$ Since Sale",
             "pct_since_sale": "% Since Sale",
@@ -766,6 +775,18 @@ with tab_pos:
                 "Rlzd P&L": st.column_config.NumberColumn(format="$%.0f"),
                 "Total P&L": st.column_config.NumberColumn(format="$%.0f"),
                 "Return %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Total Cost": st.column_config.NumberColumn(
+                    format="$%.0f",
+                    help="Lifetime invested capital: Σ (qty × price) over all BUYs for this symbol.",
+                ),
+                "Total Value": st.column_config.NumberColumn(
+                    format="$%.0f",
+                    help="Lifetime value: current market value of open shares + cash returned from all SELLs.",
+                ),
+                "TROIC %": st.column_config.NumberColumn(
+                    format="%.1f%%",
+                    help="Total Return on Invested Capital: Total Value ÷ Total Cost − 1.",
+                ),
                 "Avg Sale Price": st.column_config.NumberColumn(format="$%.2f"),
                 "$ Since Sale": st.column_config.NumberColumn(
                     format="$%.0f",
@@ -791,6 +812,13 @@ with tab_pos:
         )
         tot_return_pct = (tot_pnl / cost_basis_total * 100.0) if cost_basis_total > 0 else 0.0
 
+        # Lifetime TROIC over the visible subset: recompute from summed Cost/Value,
+        # NOT the mean of per-row TROIC % (which would be wrong).
+        tot_total_cost = float(base["total_cost"].sum())
+        tot_total_value = float(base["total_value"].sum())
+        tot_troic_pct = ((tot_total_value / tot_total_cost - 1.0) * 100.0
+                         if tot_total_cost > 0 else None)
+
         ss_dollar_total = float(base["dollar_since_sale"].dropna().sum())
         sale_value_total = float((base["avg_sale_price"].fillna(0) * base["total_sell_qty"]).sum())
         tot_pct_since_sale = (ss_dollar_total / sale_value_total * 100.0) if sale_value_total > 0 else None
@@ -808,6 +836,9 @@ with tab_pos:
             "Rlzd P&L": tot_real,
             "Total P&L": tot_pnl,
             "Return %": tot_return_pct,
+            "Total Cost": tot_total_cost,
+            "Total Value": tot_total_value,
+            "TROIC %": tot_troic_pct,
             "$ Since Sale": ss_dollar_total if sale_value_total > 0 else None,
             "% Since Sale": tot_pct_since_sale,
             "XIRR": f"{subset_xirr*100:.1f}%" if subset_xirr is not None else "—",
@@ -821,6 +852,9 @@ with tab_pos:
                 "Rlzd P&L": st.column_config.NumberColumn(format="$%.0f"),
                 "Total P&L": st.column_config.NumberColumn(format="$%.0f"),
                 "Return %": st.column_config.NumberColumn(format="%.2f%%"),
+                "Total Cost": st.column_config.NumberColumn(format="$%.0f"),
+                "Total Value": st.column_config.NumberColumn(format="$%.0f"),
+                "TROIC %": st.column_config.NumberColumn(format="%.1f%%"),
                 "$ Since Sale": st.column_config.NumberColumn(format="$%.0f"),
                 "% Since Sale": st.column_config.NumberColumn(format="%.2f%%"),
             },
