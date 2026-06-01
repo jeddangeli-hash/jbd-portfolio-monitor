@@ -215,6 +215,32 @@ def benchmark_growth(hist_close: pd.Series) -> pd.Series:
     return s / s.iloc[0]
 
 
+def compute_rsi(close: pd.Series, period: int = 14) -> float | None:
+    """Wilder's RSI of the LAST point of a close-price series.
+
+    Standard 14-period RSI: gains/losses smoothed with Wilder's moving average
+    (an EMA with alpha = 1/period). Returns None when there are fewer than
+    period+1 valid observations, or 100.0 when there are no losses in-window.
+    """
+    s = pd.to_numeric(close, errors="coerce").dropna()
+    if len(s) < period + 1:
+        return None
+    delta = s.diff().dropna().to_numpy()
+    gain = delta.clip(min=0.0)
+    loss = (-delta).clip(min=0.0)
+    # Canonical Wilder: seed the averages with the SMA of the first `period`
+    # gains/losses, then apply Wilder's recursive smoothing for the rest.
+    avg_gain = gain[:period].mean()
+    avg_loss = loss[:period].mean()
+    for i in range(period, len(gain)):
+        avg_gain = (avg_gain * (period - 1) + gain[i]) / period
+        avg_loss = (avg_loss * (period - 1) + loss[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return float(100.0 - 100.0 / (1.0 + rs))
+
+
 def position_contribution(positions: pd.DataFrame) -> pd.DataFrame:
     """Rank holdings by their absolute contribution to total P&L."""
     df = positions[["symbol", "unrealized_pnl", "realized_pnl", "invested", "market_value"]].copy()

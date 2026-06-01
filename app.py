@@ -16,6 +16,7 @@ import portfolio as pf
 import prices as pr
 import metrics as mt
 import tax
+import bonds
 
 # ---------- Page config ------------------------------------------------------
 
@@ -128,6 +129,66 @@ with st.sidebar:
     benchmark = st.selectbox("Benchmark", ["SPY", "QQQ", "VTI", "ACWI", "URTH", "None"], index=0)
     period = st.selectbox("History period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
     rf_rate = st.slider("Risk-free rate (Sharpe)", 0.0, 0.10, 0.04, 0.005)
+
+    # ----- Bond / BTP (manual, JSON-persisted) -------------------------------
+    BOND_JSON = Path(__file__).parent / "data" / "bond.json"
+    st.divider()
+    st.markdown("#### 🏛️ Bond / BTP")
+    bond_included = st.checkbox("Includi BTP nel portafoglio", value=True, key="bond_incl")
+    _bd = bonds.load_bond_data(BOND_JSON)
+    inflation_assumed = st.slider("Inflazione assunta (% per YTM nominale)",
+                                  0.0, 8.0, 2.0, 0.1, key="b_infl")
+    with st.expander("Dati BTP", expanded=False):
+        b_isin = st.text_input("ISIN", _bd["isin"], key="b_isin")
+        b_nominal = st.number_input("Nominale (EUR)", value=float(_bd["nominal"]),
+                                    step=1000.0, key="b_nom")
+        b_load = st.number_input("Prezzo medio carico (base 100)", value=float(_bd["price_load"]),
+                                 step=0.01, format="%.4f", key="b_load")
+        # Market price: live-fetchable. Use session_state so the Fetch button can
+        # push a value into the widget without the value=/key= conflict.
+        st.session_state.setdefault("b_market", float(_bd["price_market"]))
+        cpa, cpb = st.columns([2, 1])
+        if cpb.button("Fetch live", help=f"yfinance ISIN {b_isin}"):
+            _q = pr.fetch_quotes([b_isin])
+            _live = _q.get(b_isin, {}).get("price")
+            if _live:
+                st.session_state["b_market"] = round(float(_live), 4)
+                st.success(f"Live {float(_live):.4f}")
+                st.rerun()
+            else:
+                st.warning("Prezzo live non trovato — uso il manuale.")
+        b_market = cpa.number_input("Prezzo mercato (base 100)", step=0.01,
+                                    format="%.4f", key="b_market")
+        b_coupon = st.number_input("Cedola annua reale (%)", value=float(_bd["coupon_pct"]),
+                                   step=0.05, key="b_coupon")
+        b_freq = st.selectbox("Frequenza cedole/anno", [1, 2, 4],
+                              index=[1, 2, 4].index(int(_bd["frequency"])), key="b_freq")
+        b_accrued = st.number_input("Rateo in corso (EUR)", value=float(_bd["accrued"]),
+                                    step=1.0, key="b_accr")
+        b_next = st.date_input("Prossima cedola",
+                               value=date.fromisoformat(str(_bd["next_coupon"])), key="b_next")
+        b_mat = st.date_input("Scadenza",
+                              value=date.fromisoformat(str(_bd["maturity"])), key="b_mat")
+        if st.button("💾 Salva BTP", use_container_width=True):
+            bonds.save_bond_data(BOND_JSON, {
+                "isin": b_isin, "nominal": b_nominal, "price_load": b_load,
+                "price_market": b_market, "coupon_pct": b_coupon, "frequency": b_freq,
+                "accrued": b_accrued, "next_coupon": b_next, "maturity": b_mat,
+                "currency": "EUR"})
+            st.success("BTP salvato.")
+
+    bond = None
+    if bond_included:
+        try:
+            bond = bonds.Bond(
+                isin=b_isin, nominal=float(b_nominal), price_load=float(b_load),
+                price_market=float(b_market), coupon_pct=float(b_coupon),
+                frequency=int(b_freq), accrued=float(b_accrued),
+                next_coupon=b_next, maturity=b_mat, currency="EUR")
+        except Exception as e:  # noqa: BLE001 — surface bad manual input, don't crash
+            st.error(f"Bond input error: {e}")
+            bond = None
+
     st.divider()
     st.caption(f"Valuation date: **{date.today().isoformat()}**")
     if st.button("🔄 Refresh prices", use_container_width=True):
@@ -145,7 +206,7 @@ def load_tx(path_or_buf) -> pd.DataFrame:
 
 # Collect every uploaded file with its asset-class tag. If nothing is uploaded,
 # fall back to the bundled stocks CSV so behaviour matches the single-file app.
-ASSET_LABELS = {"stocks": "Stocks", "etf": "ETF", "crypto": "Crypto"}
+ASSET_LABELS = {"stocks": "Stocks", "etf": "ETF", "crypto": "Crypto", "bond": "Bond"}
 _sources: list[tuple[object, str]] = []
 if stocks_file is not None:
     _sources.append((stocks_file, "stocks"))
@@ -156,7 +217,7 @@ if crypto_file is not None:
 if not _sources and DEFAULT_CSV.exists():
     _sources.append((str(DEFAULT_CSV), "stocks"))
 
-if not _sources:
+if not _sources and bond is None:
     st.markdown("# 📈 JBD Portfolio Monitor")
     st.info(
         "👋 **Welcome!** Upload a Yahoo Finance portfolio CSV from the sidebar to get started.\n\n"
@@ -165,24 +226,33 @@ if not _sources:
     )
     st.caption("Expected columns: Symbol · Trade Date · Purchase Price · Quantity · Transaction Type "
                "(+ optional Current Price). Common Yahoo column aliases are supported automatically.")
+    st.caption("…or just enable the **🏛️ Bond / BTP** section in the sidebar to track a bond alone.")
     st.stop()
 
 # Tag each frame with its asset class and concatenate into one master ledger.
 # load_tx is cached and returns the cached object by reference, so copy before
-# adding the tag to avoid mutating the cache.
+# adding the tag to avoid mutating the cache. With only a bond (no CSV) tx_all is
+# an empty ledger — the bond is handled outside the transaction pipeline.
 _frames = []
 for _buf, _cls in _sources:
     _df = load_tx(_buf).copy()
     _df["asset_class"] = _cls
     _frames.append(_df)
-tx_all = (pd.concat(_frames, ignore_index=True)
-          .sort_values(["symbol", "trade_date"]).reset_index(drop=True))
+if _frames:
+    tx_all = (pd.concat(_frames, ignore_index=True)
+              .sort_values(["symbol", "trade_date"]).reset_index(drop=True))
+else:
+    tx_all = pd.DataFrame(columns=["symbol", "trade_date", "price", "qty", "side",
+                                   "signed_qty", "cashflow", "snapshot_price", "asset_class"])
 
 # Asset-class selector: only the classes actually loaded, ordered consistently.
 # When >1 class is loaded, "Generale" (cross-asset aggregate) is the first option
 # and the default. With a single class the radio is hidden, so a stocks-only load
 # is identical to the previous single-file app.
 present_classes = [c for c in ("stocks", "etf", "crypto") if c in set(tx_all["asset_class"])]
+# The bond is not a CSV class — append it when the BTP is included in the sidebar.
+if bond is not None:
+    present_classes = present_classes + ["bond"]
 
 st.markdown("# 📈 JBD Portfolio Monitor")
 if len(present_classes) > 1:
@@ -198,11 +268,12 @@ else:
     selected_class = present_classes[0]
 
 IS_GENERAL = selected_class == "Generale"
+IS_BOND = selected_class == "bond"
 
 # Single filter point: every per-class global (positions, symbols, quotes, KPIs,
-# TWR, all 13 tabs) derives from this subset. Skipped for the Generale view,
-# which aggregates across classes in render_general() below.
-if not IS_GENERAL:
+# TWR, all 13 tabs) derives from this subset. Skipped for the Generale and Bond
+# views, which render their own dedicated pages below.
+if not IS_GENERAL and not IS_BOND:
     tx = tx_all[tx_all["asset_class"] == selected_class].reset_index(drop=True)
     all_positions = pf.build_positions(tx)
     positions = all_positions[all_positions["qty"] > 1e-6].reset_index(drop=True)
@@ -253,7 +324,28 @@ def get_fx_rate(pair: str) -> float | None:
     return float(rate) if rate else None
 
 
-def render_general(tx_all: pd.DataFrame, classes: list[str]) -> None:
+def _bond_position_row(bond) -> dict:
+    """A static position row for the bond, shaped like an enriched all_pos row.
+
+    qty·current_price == market_value (price expressed per unit nominal), EUR
+    columns set directly (divisor 1.0), realized 0. Injected at the positions
+    level so the bond flows into totals/allocation/holdings without any tx.
+    """
+    # qty in units of €100 face so qty·price == market_value while the displayed
+    # price stays the recognizable base-100 bond quote (e.g. 102.37).
+    return {
+        "symbol": bond.isin, "qty": bond.nominal / 100.0, "avg_cost": bond.price_load,
+        "invested": bond.load_value, "realized_pnl": 0.0, "first_buy": pd.NaT,
+        "snapshot_price": float("nan"), "asset_class": "bond",
+        "current_price": bond.price_market, "market_value": bond.market_value,
+        "unrealized_pnl": bond.pnl, "total_pnl": bond.pnl, "return_pct": bond.return_pct,
+        "currency": "EUR", "divisor": 1.0,
+        "market_value_eur": bond.market_value, "invested_eur": bond.load_value,
+        "unrealized_pnl_eur": bond.pnl, "realized_pnl_eur": 0.0,
+    }
+
+
+def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     """Cross-asset aggregate view ('Generale').
 
     Positions are built per class and concatenated with the asset_class tag, so
@@ -267,10 +359,34 @@ def render_general(tx_all: pd.DataFrame, classes: list[str]) -> None:
     """
     today_ = date.today()
 
-    # 1) Build positions per class (collision-safe), concat with the tag.
+    # 0) Asset-class filter for the aggregate. Deselecting a class removes it from
+    #    EVERYTHING below (KPIs, allocation, value-by-class, holdings, Performance).
+    sel = st.multiselect(
+        "Asset classes in aggregate",
+        options=classes, default=classes,
+        format_func=lambda c: ASSET_LABELS[c],
+        help="Include / exclude asset classes from the cross-asset aggregate.",
+    )
+    if not sel:
+        st.info("Select at least one asset class to aggregate.")
+        return
+    classes = sel
+    # The bond carries no transactions; the CSV machinery (positions/quotes/FX)
+    # only runs over the CSV classes. The aggregate needs at least one CSV class.
+    csv_classes = [c for c in classes if c != "bond"]
+    if not csv_classes:
+        st.info("Select at least one non-bond class for the aggregate "
+                "(the bond on its own is shown in the **Bond** view).")
+        return
+    # tx restricted to the selected CSV classes — the single source for every
+    # tx-wide computation below. Filtering by (asset_class, symbol) keeps a ticker
+    # shared with a DESELECTED class from being double-counted.
+    tx_sel = tx_all[tx_all["asset_class"].isin(csv_classes)]
+
+    # 1) Build positions per CSV class (collision-safe), concat with the tag.
     built = []
-    for cls in classes:
-        sub = tx_all[tx_all["asset_class"] == cls]
+    for cls in csv_classes:
+        sub = tx_sel[tx_sel["asset_class"] == cls]
         ap = pf.build_positions(sub)
         ap["asset_class"] = cls
         built.append(ap)
@@ -297,12 +413,20 @@ def render_general(tx_all: pd.DataFrame, classes: list[str]) -> None:
         if r:
             divisor[ccy] = r
     all_pos["divisor"] = all_pos["currency"].map(divisor)
-    convertible = all_pos["divisor"].notna()
 
     # 4) EUR columns (NaN where not convertible → naturally excluded from sums).
     for col in ("market_value", "invested", "unrealized_pnl", "realized_pnl"):
         all_pos[f"{col}_eur"] = all_pos[col] / all_pos["divisor"]
 
+    # Inject the bond as a static EUR position (option b): it lands in the totals,
+    # allocation, holdings and filter, but carries no transactions — so it is absent
+    # from tx_sel/tx_eur and thus excluded from XIRR and the Performance series.
+    bond_in = bond is not None and "bond" in classes
+    if bond_in:
+        all_pos = pd.concat([all_pos, pd.DataFrame([_bond_position_row(bond)])],
+                            ignore_index=True)
+
+    convertible = all_pos["divisor"].notna()
     open_mask = all_pos["qty"] > 1e-6
     open_pos = all_pos[open_mask].copy()            # all open (incl. unconvertible)
     oc = all_pos[open_mask & convertible].copy()    # open AND convertible (EUR sums)
@@ -311,6 +435,10 @@ def render_general(tx_all: pd.DataFrame, classes: list[str]) -> None:
     total_unreal_eur = float(oc["unrealized_pnl_eur"].sum())
     total_real_eur = float(all_pos.loc[convertible, "realized_pnl_eur"].sum())
     total_pnl_eur = total_unreal_eur + total_real_eur
+    # The bond is excluded from XIRR and the Performance time-series (it has no tx
+    # history); those use the CSV-only market value for the terminal/pin.
+    bond_mv_eur = bond.market_value if bond_in else 0.0
+    csv_mv_eur = total_mv_eur - bond_mv_eur
 
     # EUR cashflow basis — single source of truth for "simple return on net cash",
     # shared by the headline KPI (below) and the Return decomposition further down,
@@ -318,25 +446,27 @@ def render_general(tx_all: pd.DataFrame, classes: list[str]) -> None:
     # divisor; tx in unconvertible currencies are excluded (consistent with totals).
     sym_div = {s: divisor.get(ccy_map.get(s)) for s in all_syms}
     conv_syms = [s for s in all_syms if sym_div.get(s)]
-    tx_eur = tx_all[tx_all["symbol"].isin(conv_syms)].copy()
+    tx_eur = tx_sel[tx_sel["symbol"].isin(conv_syms)].copy()
     tx_eur["price"] = tx_eur.apply(lambda r: r["price"] / sym_div[r["symbol"]], axis=1)
     buy_eur = tx_eur[tx_eur["side"] == "BUY"]
     sell_eur = tx_eur[tx_eur["side"] == "SELL"]
     deployed_eur = float((buy_eur["qty"] * buy_eur["price"]).sum())
     returned_eur = float((sell_eur["qty"] * sell_eur["price"]).sum())
+    if bond_in:
+        deployed_eur += bond.load_value  # bond = single buy at load value, no sells
     net_cash_in_eur = deployed_eur - returned_eur
     simple_on_net = (total_pnl_eur / net_cash_in_eur * 100.0) if net_cash_in_eur > 0 else 0.0
 
     # 5) EUR XIRR: convert each cashflow by its symbol's currency (today's rate),
     #    drop tx in unsupported currencies, pin the final EUR market value.
     cf = []
-    for _, r in tx_all.iterrows():
+    for _, r in tx_sel.iterrows():
         d = divisor.get(ccy_map.get(r["symbol"]))
         if d:
             td = r["trade_date"].date() if hasattr(r["trade_date"], "date") else r["trade_date"]
             cf.append((td, float(r["cashflow"]) / d))
-    if total_mv_eur > 0:
-        cf.append((today_, total_mv_eur))
+    if csv_mv_eur > 0:  # bond excluded from XIRR (no tx history)
+        cf.append((today_, csv_mv_eur))
     agg_xirr = pf.xirr(cf) if cf else None
 
     # ---- header + warnings -------------------------------------------------
@@ -397,19 +527,58 @@ def render_general(tx_all: pd.DataFrame, classes: list[str]) -> None:
                        .dropna(subset=["currency"])
                        .groupby("currency")["market_value"].sum())
             nat_str = " · ".join(f"{cur} {v:,.0f}" for cur, v in natives.items()) or "—"
-            rows.append({"Class": ASSET_LABELS[cls],
-                         "Market value (€)": eur_v, "Native": nat_str})
+            # % return for the class = class total P&L EUR / class net cash invested EUR,
+            # same simple-return formula as the headline KPI. The bond has no tx, so
+            # its net cash is its load value (single buy, no sells).
+            if cls == "bond" and bond_in:
+                cls_net = bond.load_value
+            else:
+                cls_tx = tx_eur[tx_eur["asset_class"] == cls]
+                cls_buy = cls_tx[cls_tx["side"] == "BUY"]
+                cls_sell = cls_tx[cls_tx["side"] == "SELL"]
+                cls_net = (float((cls_buy["qty"] * cls_buy["price"]).sum())
+                           - float((cls_sell["qty"] * cls_sell["price"]).sum()))
+            cls_unreal = float(oc.loc[oc["asset_class"] == cls, "unrealized_pnl_eur"].sum())
+            cls_real = float(all_pos.loc[convertible & (all_pos["asset_class"] == cls),
+                                         "realized_pnl_eur"].sum())
+            cls_ret = ((cls_unreal + cls_real) / cls_net * 100.0) if cls_net > 0 else None
+            rows.append({"Class": ASSET_LABELS[cls], "Market value (€)": eur_v,
+                         "% return": cls_ret, "Native": nat_str})
         st.dataframe(
             pd.DataFrame(rows), hide_index=True, use_container_width=True,
-            column_config={"Market value (€)": st.column_config.NumberColumn(format="€%.0f")},
+            column_config={
+                "Market value (€)": st.column_config.NumberColumn(format="€%.0f"),
+                "% return": st.column_config.NumberColumn(format="%.2f%%"),
+            },
         )
 
     st.divider()
     st.subheader("All holdings")
-    table = open_pos.copy()
+    show_closed = st.checkbox(
+        "Mostra posizioni chiuse", value=False,
+        help="Include closed positions (qty ≈ 0): market value 0, but realized P&L ≠ 0.")
+    # all_pos = open + closed; open_pos = open only. Closed rows carry realized P&L.
+    src = all_pos if show_closed else open_pos
+    table = src.copy()
     table["Class"] = table["asset_class"].map(ASSET_LABELS)
+    table["total_pnl_eur"] = table["unrealized_pnl_eur"] + table["realized_pnl_eur"]
+
+    # Return % = Total P&L EUR ÷ gross buy cost EUR. Gross cost = Σ qty·price over
+    # ALL buys of this (symbol, asset_class), from tx_eur (already EUR, class-scoped).
+    # Stable denominator: unlike net cash it doesn't collapse to ~0 on closed
+    # positions, so the % stays meaningful across the open→closed lifecycle.
+    gross_cost = (tx_eur[tx_eur["side"] == "BUY"]
+                  .assign(_c=lambda d: d["qty"] * d["price"])
+                  .groupby(["symbol", "asset_class"])["_c"].sum())
+    if bond_in:  # bond gross cost = its load value (single buy, no tx)
+        gross_cost.loc[(bond.isin, "bond")] = bond.load_value
+    table["gross_cost_eur"] = [gross_cost.get((s, a))
+                               for s, a in zip(table["symbol"], table["asset_class"])]
+    table["return_pct"] = table["total_pnl_eur"] / table["gross_cost_eur"] * 100.0
+
     table = table[["Class", "symbol", "currency", "qty", "current_price",
-                   "market_value", "market_value_eur", "unrealized_pnl_eur", "return_pct"]]
+                   "market_value", "market_value_eur", "unrealized_pnl_eur",
+                   "realized_pnl_eur", "total_pnl_eur", "return_pct"]]
     table = table.sort_values("market_value_eur", ascending=False, na_position="last")
     st.dataframe(
         table, hide_index=True, use_container_width=True,
@@ -421,26 +590,35 @@ def render_general(tx_all: pd.DataFrame, classes: list[str]) -> None:
             "market_value": st.column_config.NumberColumn("MV (native)", format="%.0f"),
             "market_value_eur": st.column_config.NumberColumn("MV (€)", format="€%.0f"),
             "unrealized_pnl_eur": st.column_config.NumberColumn("Unrealized (€)", format="€%.0f"),
-            "return_pct": st.column_config.NumberColumn("Return %", format="%.2f%%"),
+            "realized_pnl_eur": st.column_config.NumberColumn("Realized (€)", format="€%.0f"),
+            "total_pnl_eur": st.column_config.NumberColumn("Total P&L (€)", format="€%.0f"),
+            "return_pct": st.column_config.NumberColumn(
+                "Return %", format="%.2f%%",
+                help="Total P&L ÷ gross buy cost (Σ qty·price of all buys), in EUR."),
         },
     )
 
     # ===================================================================
     # Performance (aggregate · EUR) — mirror of the Stocks "Performance" tab,
-    # computed on tx_all across all classes and converted to EUR.
+    # computed on the selected classes (tx_sel/tx_eur) and converted to EUR.
     # ===================================================================
     st.divider()
     st.header("Performance (aggregate · EUR)")
     st.caption("Same methodology as the per-class Performance tab, aggregated across "
                "all classes. Historical prices and cashflows are converted to EUR at "
                "**today's** FX rate (an accepted approximation for past values).")
+    if bond_in:
+        st.caption(f"ℹ️ The bond (€{bond_mv_eur:,.0f}) is **excluded** from these time-series "
+                   "(it has no price history) — these curves reflect the CSV classes only, so "
+                   "they won't match the bond-inclusive KPIs above.")
 
     # ---- EUR history ingredient (tx_eur / conv_syms / sym_div built above) ----
-    # Generale uses the TRUE inception via period="max": build_value_series' leading-
-    # zero trim then starts the series at the first day a position was held (= first
-    # trade_date). The sidebar 'period' deliberately does NOT apply here — per-class
-    # tabs still use it. One close-price column per convertible symbol, ÷ its rate.
-    hist_eur = get_history(tuple(conv_syms), "max") if pr.HAS_YF else pd.DataFrame()
+    # Generale uses period="2y" (covers all post-2024 transactions with margin and
+    # is lighter than "max"): build_value_series' leading-zero trim then starts the
+    # series at the first day a position was held (= first trade_date). The sidebar
+    # 'period' deliberately does NOT apply here — per-class tabs still use it. One
+    # close-price column per convertible symbol, ÷ its rate.
+    hist_eur = get_history(tuple(conv_syms), "2y") if pr.HAS_YF else pd.DataFrame()
     if not hist_eur.empty:
         hist_eur = hist_eur.copy()
         for s in hist_eur.columns:
@@ -456,15 +634,15 @@ def render_general(tx_all: pd.DataFrame, classes: list[str]) -> None:
             first_idx = value_series_g[value_series_g > 0].index[0]
             value_series_g = value_series_g.loc[first_idx:]
             cf_series_g = cf_series_g.loc[first_idx:]
-            # Pin the last point to the EUR Market-Value KPI so the chart endpoint
-            # matches the headline figure (same trick as the global build).
-            if total_mv_eur > 0:
-                value_series_g.iloc[-1] = total_mv_eur
+            # Pin the last point to the CSV-only EUR market value (bond excluded
+            # from the series) so the curve matches the tradeable portfolio.
+            if csv_mv_eur > 0:
+                value_series_g.iloc[-1] = csv_mv_eur
             twr_g = mt.twr_curve(value_series_g, cf_series_g)
         if benchmark != "None":
-            # "max" so the benchmark spans inception too (the TWR index now starts
-            # at the first trade, not the sidebar window).
-            b = get_benchmark(benchmark, "max")
+            # "2y" so the benchmark spans the aggregate's inception window too (the
+            # TWR index starts at the first trade, not the sidebar window).
+            b = get_benchmark(benchmark, "2y")
             if not b.empty and not twr_g.empty:
                 b = b.reindex(twr_g.index, method="ffill").dropna()
                 bench_g = mt.benchmark_growth(b)
@@ -523,7 +701,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str]) -> None:
         # Portfolio return curve vs benchmark — toggleable (unique key!)
         chart_mode_g = st.radio(
             "Return measure for chart",
-            ["TWR (time-weighted)", "Simple return on net cash"],
+            ["Simple return on net cash", "TWR (time-weighted)"],
             horizontal=True, key="gen_chart_mode",
         )
         cum_deposits_curve = cf_series_g.cumsum()
@@ -648,8 +826,58 @@ def render_general(tx_all: pd.DataFrame, classes: list[str]) -> None:
                    f"{int((total_pnl_curve >= 0).sum())} / {len(total_pnl_curve)}")
 
 
+def render_bond_view(bond, inflation_pct: float) -> None:
+    """Dedicated per-class view for the bond (no CSV tabs)."""
+    st.subheader(f"Bond — {bond.isin}")
+    freq_txt = {1: "annual", 2: "semiannual", 4: "quarterly"}.get(bond.frequency, f"{bond.frequency}×/yr")
+    st.caption(f"Maturity {bond.maturity.isoformat()} · coupon {bond.coupon_pct:.2f}% "
+               f"({freq_txt}, real) · {bond.currency} · nominal €{bond.nominal:,.0f}")
+
+    ytm_r = bond.ytm_real()
+    ytm_n = bond.ytm_nominal(inflation_pct)
+
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Load value (clean)", f"€{bond.load_value:,.0f}",
+              help=f"nominal × {bond.price_load:.4f}/100")
+    a2.metric("Market value (clean)", f"€{bond.market_value:,.0f}",
+              help=f"nominal × {bond.price_market:.4f}/100")
+    a3.metric("P&L (capital)", f"€{bond.pnl:,.0f}", f"{bond.return_pct:+.2f}%")
+    a4.metric("Accrued (rateo)", f"€{bond.accrued:,.0f}",
+              help="Shown separately — NOT in P&L or aggregate market value.")
+
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("Current yield", f"{bond.current_yield:.2f}%", help="Annual coupon ÷ market price.")
+    b2.metric("YTM real", f"{ytm_r*100:.2f}%" if ytm_r is not None else "—",
+              help="IRR of real coupons + redemption at 100, given the market price.")
+    b3.metric(f"YTM nominal (@{inflation_pct:.1f}%)", f"{ytm_n*100:.2f}%" if ytm_n is not None else "—",
+              help="Fisher approximation: real YTM + assumed inflation.")
+    b4.metric("Next coupon", bond.next_coupon.isoformat(),
+              help=f"{bond.coupon_pct / bond.frequency:.3f}% (real) per period")
+
+    st.caption("Inflation-linked: coupons are quoted in **real** terms; principal is uplifted by "
+               "realized inflation at redemption. YTM real is the inflation-adjusted yield; "
+               "nominal ≈ real + assumed inflation (Fisher). Set the inflation assumption in the sidebar.")
+
+    st.markdown("##### Coupon schedule (real, per €100 face)")
+    sched = pd.DataFrame({"Date": [d.isoformat() for d in bond.coupon_dates()]})
+    sched["Coupon (real)"] = bond.coupon_pct / bond.frequency
+    sched.loc[sched.index[-1], "Redemption"] = 100.0
+    st.dataframe(
+        sched, hide_index=True, use_container_width=True,
+        column_config={
+            "Coupon (real)": st.column_config.NumberColumn(format="%.3f"),
+            "Redemption": st.column_config.NumberColumn(format="%.0f"),
+        },
+        height=min(500, 38 * (len(sched) + 1)),
+    )
+
+
 if IS_GENERAL:
-    render_general(tx_all, present_classes)
+    render_general(tx_all, present_classes, bond)
+    st.stop()
+
+if IS_BOND:
+    render_bond_view(bond, inflation_assumed)
     st.stop()
 
 symbols = tuple(positions["symbol"].tolist())
@@ -693,6 +921,24 @@ def kpi(label: str, value: str, sub: str = "", positive: bool | None = None):
     return f'<div class="kpi-card"><div class="kpi-label">{label}</div><div class="kpi-value">{value}</div>{sub_html}</div>'
 
 total_pnl_all = total_unrealized + total_realized
+
+# Two extra return measures for the Total P&L card (per-class, native currency):
+#  (a) Simple return on net cash — same formula as the per-class Performance tab.
+#  (b) Realized return — realized P&L ÷ FIFO cost of the SOLD shares. For a
+#      long-only book that cost equals (sell proceeds − realized), so no extra
+#      lot-walking is needed. (Uncovered short sells would break this identity;
+#      the app assumes long-only throughout.)
+_buy_o = tx[tx["side"] == "BUY"]
+_sell_o = tx[tx["side"] == "SELL"]
+_deployed_o = float((_buy_o["qty"] * _buy_o["price"]).sum())
+_returned_o = float((_sell_o["qty"] * _sell_o["price"]).sum())
+_net_cash_o = _deployed_o - _returned_o
+simple_on_net_o = (total_pnl_all / _net_cash_o * 100.0) if _net_cash_o > 1e-9 else None
+_cost_of_sold_o = _returned_o - total_realized
+realized_ret_o = (total_realized / _cost_of_sold_o * 100.0) if _cost_of_sold_o > 1e-9 else None
+_son = f"{simple_on_net_o:+.2f}%" if simple_on_net_o is not None else "—"
+_rr = f"{realized_ret_o:+.2f}%" if realized_ret_o is not None else "—"
+
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.markdown(kpi("Market Value", f"${total_mv:,.0f}", f"{len(positions)} positions"), unsafe_allow_html=True)
 c2.markdown(kpi("Day Change", f"${day_change_total:,.0f}", f"{day_change_pct:+.2f}%",
@@ -701,9 +947,13 @@ c3.markdown(kpi("Unrealized P&L", f"${total_unrealized:,.0f}",
                 f"{(total_unrealized/total_invested*100 if total_invested else 0):+.2f}% on cost",
                 positive=total_unrealized >= 0), unsafe_allow_html=True)
 c4.markdown(kpi("Realized P&L", f"${total_realized:,.0f}",
-                "from closed lots", positive=total_realized >= 0), unsafe_allow_html=True)
+                f"Realized {_rr}" if realized_ret_o is not None else "from closed lots",
+                positive=(realized_ret_o >= 0) if realized_ret_o is not None else None),
+            unsafe_allow_html=True)
 c5.markdown(kpi("Total P&L", f"${total_pnl_all:,.0f}",
-                "realized + unrealized", positive=total_pnl_all >= 0), unsafe_allow_html=True)
+                f"Simple/net cash {_son}",
+                positive=(simple_on_net_o >= 0) if simple_on_net_o is not None else None),
+            unsafe_allow_html=True)
 c6.markdown(kpi("XIRR (MWR)", f"{port_xirr*100:.2f}%" if port_xirr else "n/a",
                 "money-weighted, ann.", positive=(port_xirr or 0) >= 0), unsafe_allow_html=True)
 
@@ -1237,6 +1487,15 @@ with tab_today:
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Detail")
+    # RSI(14, Wilder) from the already-downloaded price history — no extra fetch.
+    # "—" when the symbol is missing from hist or has < 15 days of data.
+    def _rsi_str(sym: str) -> str:
+        if not isinstance(hist, pd.DataFrame) or hist.empty or sym not in hist.columns:
+            return "—"
+        v = mt.compute_rsi(hist[sym], 14)
+        return f"{v:.0f}" if v is not None else "—"
+    td = td.copy()
+    td["RSI"] = td["symbol"].map(_rsi_str)
     show_td = td.rename(columns={
         "symbol": "Symbol", "qty": "Qty",
         "current_price": "Price", "prev_close": "Prev Close",
@@ -1252,6 +1511,8 @@ with tab_today:
             "$ Change": st.column_config.NumberColumn(format="$%.2f"),
             "% Change": st.column_config.NumberColumn(format="%.2f%%"),
             "Mkt Value": st.column_config.NumberColumn(format="$%.0f"),
+            "RSI": st.column_config.TextColumn("RSI", help="Relative Strength Index (14, Wilder). "
+                                               ">70 overbought · <30 oversold."),
         },
         height=min(700, 38 * (len(show_td) + 1)),
     )
