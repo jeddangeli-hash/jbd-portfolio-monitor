@@ -67,14 +67,20 @@ with st.sidebar:
     st.caption("Yahoo CSV → live analytics")
     st.divider()
 
-    uploaded = st.file_uploader("Upload Yahoo Finance CSV", type=["csv"])
+    # Three optional uploaders, one per asset class. Each takes the same Yahoo
+    # CSV schema (ETF/crypto exports are identical to stocks), so the engine
+    # stays asset-agnostic — we only tag the rows downstream.
+    stocks_file = st.file_uploader("Stocks CSV", type=["csv"], key="up_stocks")
+    etf_file = st.file_uploader("ETF CSV", type=["csv"], key="up_etf")
+    crypto_file = st.file_uploader("Crypto CSV", type=["csv"], key="up_crypto")
 
-    # When deployed to Streamlit Cloud, allow saving the uploaded CSV back to
-    # the GitHub repo so every device sees the latest version. Requires three
+    # When deployed to Streamlit Cloud, allow saving the uploaded stocks CSV back
+    # to the GitHub repo so every device sees the latest version. Requires three
     # secrets configured in Streamlit Cloud (Settings → Secrets):
     #   github_token = "ghp_..."     # PAT with `repo` scope
     #   github_repo  = "owner/repo"
     #   github_path  = "data/portfolio.csv"
+    uploaded = stocks_file  # GitHub save targets the stocks file for now
     if uploaded is not None:
         try:
             token = st.secrets.get("github_token")
@@ -137,19 +143,61 @@ with st.sidebar:
 def load_tx(path_or_buf) -> pd.DataFrame:
     return pf.load_transactions(path_or_buf)
 
-csv_source = uploaded if uploaded is not None else (str(DEFAULT_CSV) if DEFAULT_CSV.exists() else None)
-if csv_source is None:
+# Collect every uploaded file with its asset-class tag. If nothing is uploaded,
+# fall back to the bundled stocks CSV so behaviour matches the single-file app.
+ASSET_LABELS = {"stocks": "Stocks", "etf": "ETF", "crypto": "Crypto"}
+_sources: list[tuple[object, str]] = []
+if stocks_file is not None:
+    _sources.append((stocks_file, "stocks"))
+if etf_file is not None:
+    _sources.append((etf_file, "etf"))
+if crypto_file is not None:
+    _sources.append((crypto_file, "crypto"))
+if not _sources and DEFAULT_CSV.exists():
+    _sources.append((str(DEFAULT_CSV), "stocks"))
+
+if not _sources:
     st.markdown("# 📈 JBD Portfolio Monitor")
     st.info(
-        "👋 **Welcome!** Upload your Yahoo Finance portfolio CSV from the sidebar to get started.\n\n"
+        "👋 **Welcome!** Upload a Yahoo Finance portfolio CSV from the sidebar to get started.\n\n"
         "Export from Yahoo Finance → your portfolio → ⋯ menu → **Export Transactions**, "
-        "then drag the file into the **Upload Yahoo Finance CSV** control on the left."
+        "then drag the file into one of the **Stocks / ETF / Crypto CSV** controls on the left."
     )
     st.caption("Expected columns: Symbol · Trade Date · Purchase Price · Quantity · Transaction Type "
                "(+ optional Current Price). Common Yahoo column aliases are supported automatically.")
     st.stop()
 
-tx = load_tx(csv_source)
+# Tag each frame with its asset class and concatenate into one master ledger.
+# load_tx is cached and returns the cached object by reference, so copy before
+# adding the tag to avoid mutating the cache.
+_frames = []
+for _buf, _cls in _sources:
+    _df = load_tx(_buf).copy()
+    _df["asset_class"] = _cls
+    _frames.append(_df)
+tx_all = (pd.concat(_frames, ignore_index=True)
+          .sort_values(["symbol", "trade_date"]).reset_index(drop=True))
+
+# Asset-class selector: only the classes actually loaded, ordered consistently.
+# With a single class the radio is hidden, so a stocks-only load is identical to
+# the previous single-file app.
+present_classes = [c for c in ("stocks", "etf", "crypto") if c in set(tx_all["asset_class"])]
+
+st.markdown("# 📈 JBD Portfolio Monitor")
+if len(present_classes) > 1:
+    selected_class = st.radio(
+        "Asset class",
+        present_classes,
+        format_func=lambda c: ASSET_LABELS[c],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+else:
+    selected_class = present_classes[0]
+
+# Single filter point: every downstream global (positions, symbols, quotes,
+# KPIs, TWR, all 13 tabs) derives from this per-class subset.
+tx = tx_all[tx_all["asset_class"] == selected_class].reset_index(drop=True)
 all_positions = pf.build_positions(tx)
 positions = all_positions[all_positions["qty"] > 1e-6].reset_index(drop=True)
 all_symbols_ever = sorted(tx["symbol"].unique().tolist())
@@ -219,7 +267,6 @@ day_change_total = float(positions["day_change_$"].sum())
 day_change_pct = (day_change_total / total_mv * 100.0) if total_mv else 0.0
 port_xirr = pf.portfolio_xirr(tx, positions, today)
 
-st.markdown("# 📈 JBD Portfolio Monitor")
 ts = datetime.now().strftime("%Y-%m-%d %H:%M")
 src = "live (yfinance)" if use_live and quotes else "snapshot"
 st.caption(f"As of {ts} · prices: **{src}** · {len(positions)} open positions · benchmark: **{benchmark}**")
