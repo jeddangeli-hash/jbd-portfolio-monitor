@@ -179,28 +179,34 @@ tx_all = (pd.concat(_frames, ignore_index=True)
           .sort_values(["symbol", "trade_date"]).reset_index(drop=True))
 
 # Asset-class selector: only the classes actually loaded, ordered consistently.
-# With a single class the radio is hidden, so a stocks-only load is identical to
-# the previous single-file app.
+# When >1 class is loaded, "Generale" (cross-asset aggregate) is the first option
+# and the default. With a single class the radio is hidden, so a stocks-only load
+# is identical to the previous single-file app.
 present_classes = [c for c in ("stocks", "etf", "crypto") if c in set(tx_all["asset_class"])]
 
 st.markdown("# 📈 JBD Portfolio Monitor")
 if len(present_classes) > 1:
+    options = ["Generale"] + present_classes
     selected_class = st.radio(
         "Asset class",
-        present_classes,
-        format_func=lambda c: ASSET_LABELS[c],
+        options,
+        format_func=lambda c: "🌐 Generale" if c == "Generale" else ASSET_LABELS[c],
         horizontal=True,
         label_visibility="collapsed",
     )
 else:
     selected_class = present_classes[0]
 
-# Single filter point: every downstream global (positions, symbols, quotes,
-# KPIs, TWR, all 13 tabs) derives from this per-class subset.
-tx = tx_all[tx_all["asset_class"] == selected_class].reset_index(drop=True)
-all_positions = pf.build_positions(tx)
-positions = all_positions[all_positions["qty"] > 1e-6].reset_index(drop=True)
-all_symbols_ever = sorted(tx["symbol"].unique().tolist())
+IS_GENERAL = selected_class == "Generale"
+
+# Single filter point: every per-class global (positions, symbols, quotes, KPIs,
+# TWR, all 13 tabs) derives from this subset. Skipped for the Generale view,
+# which aggregates across classes in render_general() below.
+if not IS_GENERAL:
+    tx = tx_all[tx_all["asset_class"] == selected_class].reset_index(drop=True)
+    all_positions = pf.build_positions(tx)
+    positions = all_positions[all_positions["qty"] > 1e-6].reset_index(drop=True)
+    all_symbols_ever = sorted(tx["symbol"].unique().tolist())
 
 # ---------- Live prices ------------------------------------------------------
 
@@ -235,6 +241,416 @@ def get_annual_financials(symbol: str) -> pd.DataFrame:
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_quarterly_financials(symbol: str) -> pd.DataFrame:
     return pr.fetch_quarterly_financials(symbol)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_fx_rate(pair: str) -> float | None:
+    """Spot rate for a Yahoo FX ticker, e.g. EURUSD=X → units of the quote
+    currency per 1 EUR. FX pairs are ordinary Yahoo tickers, so this rides the
+    quotes path and its offline fallback. Returns None on failure.
+    """
+    q = pr.fetch_quotes([pair])
+    rate = q.get(pair, {}).get("price")
+    return float(rate) if rate else None
+
+
+def render_general(tx_all: pd.DataFrame, classes: list[str]) -> None:
+    """Cross-asset aggregate view ('Generale').
+
+    Positions are built per class and concatenated with the asset_class tag, so
+    the grain stays (symbol, asset_class) and a ticker held in two classes never
+    merges. Each position is converted to EUR using the live rate for its OWN
+    native currency (detected from the quote), then aggregated — totals are
+    homogeneous EUR. Positions whose currency or rate is unavailable are excluded
+    from the EUR totals with an explicit warning, never summed across currencies.
+    Conversion uses TODAY's rate even for realized/historical figures (accepted
+    approximation).
+    """
+    today_ = date.today()
+
+    # 1) Build positions per class (collision-safe), concat with the tag.
+    built = []
+    for cls in classes:
+        sub = tx_all[tx_all["asset_class"] == cls]
+        ap = pf.build_positions(sub)
+        ap["asset_class"] = cls
+        built.append(ap)
+    all_pos = pd.concat(built, ignore_index=True)
+
+    # 2) Detect native currency per symbol from quotes. Fetch over ALL symbols
+    #    (open + closed): closed lots' realized P&L also needs converting.
+    all_syms = tuple(sorted(all_pos["symbol"].unique()))
+    quotes_g = get_quotes(all_syms) if use_live else {}
+    price_map_g = {s: q["price"] for s, q in quotes_g.items()}
+    ccy_map = {s: q.get("currency") for s, q in quotes_g.items()}
+    all_pos = pf.enrich_with_prices(all_pos, price_map_g)
+    all_pos["currency"] = all_pos["symbol"].map(ccy_map)
+
+    # 3) Resolve an EUR divisor per distinct currency present.
+    #    EUR{CCY}=X = CCY per 1 EUR  ⇒  value_eur = value_native / rate. EUR → 1.0.
+    currencies = sorted({c for c in all_pos["currency"].dropna().unique()})
+    divisor: dict[str, float] = {}
+    for ccy in currencies:
+        if ccy == "EUR":
+            divisor[ccy] = 1.0
+            continue
+        r = get_fx_rate(f"EUR{ccy}=X") if use_live else None
+        if r:
+            divisor[ccy] = r
+    all_pos["divisor"] = all_pos["currency"].map(divisor)
+    convertible = all_pos["divisor"].notna()
+
+    # 4) EUR columns (NaN where not convertible → naturally excluded from sums).
+    for col in ("market_value", "invested", "unrealized_pnl", "realized_pnl"):
+        all_pos[f"{col}_eur"] = all_pos[col] / all_pos["divisor"]
+
+    open_mask = all_pos["qty"] > 1e-6
+    open_pos = all_pos[open_mask].copy()            # all open (incl. unconvertible)
+    oc = all_pos[open_mask & convertible].copy()    # open AND convertible (EUR sums)
+
+    total_mv_eur = float(oc["market_value_eur"].sum())
+    total_unreal_eur = float(oc["unrealized_pnl_eur"].sum())
+    total_real_eur = float(all_pos.loc[convertible, "realized_pnl_eur"].sum())
+    total_pnl_eur = total_unreal_eur + total_real_eur
+
+    # EUR cashflow basis — single source of truth for "simple return on net cash",
+    # shared by the headline KPI (below) and the Return decomposition further down,
+    # so they always tell the same story. tx prices scaled to EUR by each symbol's
+    # divisor; tx in unconvertible currencies are excluded (consistent with totals).
+    sym_div = {s: divisor.get(ccy_map.get(s)) for s in all_syms}
+    conv_syms = [s for s in all_syms if sym_div.get(s)]
+    tx_eur = tx_all[tx_all["symbol"].isin(conv_syms)].copy()
+    tx_eur["price"] = tx_eur.apply(lambda r: r["price"] / sym_div[r["symbol"]], axis=1)
+    buy_eur = tx_eur[tx_eur["side"] == "BUY"]
+    sell_eur = tx_eur[tx_eur["side"] == "SELL"]
+    deployed_eur = float((buy_eur["qty"] * buy_eur["price"]).sum())
+    returned_eur = float((sell_eur["qty"] * sell_eur["price"]).sum())
+    net_cash_in_eur = deployed_eur - returned_eur
+    simple_on_net = (total_pnl_eur / net_cash_in_eur * 100.0) if net_cash_in_eur > 0 else 0.0
+
+    # 5) EUR XIRR: convert each cashflow by its symbol's currency (today's rate),
+    #    drop tx in unsupported currencies, pin the final EUR market value.
+    cf = []
+    for _, r in tx_all.iterrows():
+        d = divisor.get(ccy_map.get(r["symbol"]))
+        if d:
+            td = r["trade_date"].date() if hasattr(r["trade_date"], "date") else r["trade_date"]
+            cf.append((td, float(r["cashflow"]) / d))
+    if total_mv_eur > 0:
+        cf.append((today_, total_mv_eur))
+    agg_xirr = pf.xirr(cf) if cf else None
+
+    # ---- header + warnings -------------------------------------------------
+    ts_ = datetime.now().strftime("%Y-%m-%d %H:%M")
+    label_list = ", ".join(ASSET_LABELS[c] for c in classes)
+    st.caption(f"As of {ts_} · aggregate of **{label_list}** · "
+               f"{int(open_mask.sum())} open positions · totals in **EUR** "
+               f"(today's FX applied to realized/historical too)")
+
+    if not use_live:
+        st.warning("Live prices are off — EUR conversion needs live quotes/FX. "
+                   "Enable “Fetch live prices” in the sidebar to aggregate in EUR.")
+    excluded = open_pos[~convertible[open_mask].values]
+    if not excluded.empty:
+        items = "; ".join(
+            f"{row.symbol} ({row.currency if isinstance(row.currency, str) else 'unknown'})"
+            for row in excluded.itertuples())
+        st.warning(f"Excluded from EUR totals — no rate for their currency: {items}. "
+                   "Native values still appear in the holdings table below.")
+
+    # ---- KPIs (EUR primary) ------------------------------------------------
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Market Value", f"€{total_mv_eur:,.0f}")
+    c2.metric("Total P&L", f"€{total_pnl_eur:,.0f}")
+    c3.metric("Unrealized P&L", f"€{total_unreal_eur:,.0f}")
+    c4.metric("Realized P&L", f"€{total_real_eur:,.0f}")
+    c5.metric("Simple return on net cash", f"{simple_on_net:+.2f}%",
+              help="Total EUR P&L ÷ net cash invested (deployed − returned). "
+                   "Matches the simple-return chart below.")
+    c6.metric("XIRR (MWR)", f"{agg_xirr*100:.2f}%" if agg_xirr else "n/a")
+    fx_txt = " · ".join(f"EUR{c}={divisor[c]:.4f}" for c in currencies
+                        if c != "EUR" and c in divisor)
+    if fx_txt:
+        st.caption(f"💶 FX today: {fx_txt}")
+
+    st.divider()
+
+    # ---- allocation (EUR) + per-class native breakdown --------------------
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Allocation by asset class (EUR)")
+        alloc = (oc.groupby("asset_class")["market_value_eur"].sum()
+                 .reindex(classes).fillna(0.0).reset_index())
+        alloc["label"] = alloc["asset_class"].map(ASSET_LABELS)
+        if total_mv_eur > 0:
+            fig = px.pie(alloc, names="label", values="market_value_eur", hole=0.55)
+            fig.update_traces(textposition="inside", textinfo="percent+label")
+            fig.update_layout(showlegend=True, margin=dict(t=10, b=10, l=10, r=10), height=300)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No convertible open positions to allocate.")
+    with right:
+        st.subheader("Value by class — EUR vs native")
+        rows = []
+        for cls in classes:
+            eur_v = float(oc.loc[oc["asset_class"] == cls, "market_value_eur"].sum())
+            natives = (open_pos[open_pos["asset_class"] == cls]
+                       .dropna(subset=["currency"])
+                       .groupby("currency")["market_value"].sum())
+            nat_str = " · ".join(f"{cur} {v:,.0f}" for cur, v in natives.items()) or "—"
+            rows.append({"Class": ASSET_LABELS[cls],
+                         "Market value (€)": eur_v, "Native": nat_str})
+        st.dataframe(
+            pd.DataFrame(rows), hide_index=True, use_container_width=True,
+            column_config={"Market value (€)": st.column_config.NumberColumn(format="€%.0f")},
+        )
+
+    st.divider()
+    st.subheader("All holdings")
+    table = open_pos.copy()
+    table["Class"] = table["asset_class"].map(ASSET_LABELS)
+    table = table[["Class", "symbol", "currency", "qty", "current_price",
+                   "market_value", "market_value_eur", "unrealized_pnl_eur", "return_pct"]]
+    table = table.sort_values("market_value_eur", ascending=False, na_position="last")
+    st.dataframe(
+        table, hide_index=True, use_container_width=True,
+        column_config={
+            "symbol": "Symbol",
+            "currency": "Ccy",
+            "qty": st.column_config.NumberColumn("Qty", format="%.4f"),
+            "current_price": st.column_config.NumberColumn("Price (native)", format="%.2f"),
+            "market_value": st.column_config.NumberColumn("MV (native)", format="%.0f"),
+            "market_value_eur": st.column_config.NumberColumn("MV (€)", format="€%.0f"),
+            "unrealized_pnl_eur": st.column_config.NumberColumn("Unrealized (€)", format="€%.0f"),
+            "return_pct": st.column_config.NumberColumn("Return %", format="%.2f%%"),
+        },
+    )
+
+    # ===================================================================
+    # Performance (aggregate · EUR) — mirror of the Stocks "Performance" tab,
+    # computed on tx_all across all classes and converted to EUR.
+    # ===================================================================
+    st.divider()
+    st.header("Performance (aggregate · EUR)")
+    st.caption("Same methodology as the per-class Performance tab, aggregated across "
+               "all classes. Historical prices and cashflows are converted to EUR at "
+               "**today's** FX rate (an accepted approximation for past values).")
+
+    # ---- EUR history ingredient (tx_eur / conv_syms / sym_div built above) ----
+    # Generale uses the TRUE inception via period="max": build_value_series' leading-
+    # zero trim then starts the series at the first day a position was held (= first
+    # trade_date). The sidebar 'period' deliberately does NOT apply here — per-class
+    # tabs still use it. One close-price column per convertible symbol, ÷ its rate.
+    hist_eur = get_history(tuple(conv_syms), "max") if pr.HAS_YF else pd.DataFrame()
+    if not hist_eur.empty:
+        hist_eur = hist_eur.copy()
+        for s in hist_eur.columns:
+            hist_eur[s] = hist_eur[s] / sym_div[s]
+
+    value_series_g = pd.Series(dtype=float)
+    cf_series_g = pd.Series(dtype=float)
+    twr_g = pd.Series(dtype=float)
+    bench_g = pd.Series(dtype=float)
+    if not hist_eur.empty:
+        value_series_g, cf_series_g = mt.build_value_series(tx_eur, hist_eur)
+        if not value_series_g.empty and (value_series_g > 0).any():
+            first_idx = value_series_g[value_series_g > 0].index[0]
+            value_series_g = value_series_g.loc[first_idx:]
+            cf_series_g = cf_series_g.loc[first_idx:]
+            # Pin the last point to the EUR Market-Value KPI so the chart endpoint
+            # matches the headline figure (same trick as the global build).
+            if total_mv_eur > 0:
+                value_series_g.iloc[-1] = total_mv_eur
+            twr_g = mt.twr_curve(value_series_g, cf_series_g)
+        if benchmark != "None":
+            # "max" so the benchmark spans inception too (the TWR index now starts
+            # at the first trade, not the sidebar window).
+            b = get_benchmark(benchmark, "max")
+            if not b.empty and not twr_g.empty:
+                b = b.reindex(twr_g.index, method="ffill").dropna()
+                bench_g = mt.benchmark_growth(b)
+
+    if twr_g.empty:
+        st.warning("Need yfinance + a non-empty history to compute aggregate TWR. "
+                   "Pick a longer period, or check that holdings have convertible currencies.")
+    else:
+        # ----- Return decomposition (EUR) ----------------------------------
+        st.subheader("Return decomposition")
+        st.caption("Different methods answer different questions — all 'correct', "
+                   "measuring different things.")
+        twr_itd = float(twr_g.iloc[-1] - 1) if len(twr_g) >= 2 else 0.0
+        # deployed_eur / returned_eur / net_cash_in_eur / simple_on_net are computed
+        # once above (shared with the headline KPI). Only simple_on_deployed is local.
+        simple_on_deployed = (total_pnl_eur / deployed_eur * 100.0) if deployed_eur > 0 else 0.0
+
+        rd1, rd2, rd3, rd4 = st.columns(4)
+        rd1.metric("TWR (time-weighted)", f"{twr_itd*100:+.2f}%",
+                   help="Chain-linked daily returns — price moves only, ignores cash timing. "
+                        "Compare to the benchmark below.")
+        rd2.metric("XIRR (money-weighted, ann.)",
+                   f"{agg_xirr*100:.2f}%" if agg_xirr else "—",
+                   help="Annualized return on actual EUR cashflows, time-discounted.")
+        rd3.metric("Simple return on net cash", f"{simple_on_net:+.2f}%",
+                   help="Total P&L ÷ net cash invested (deployed − returned), in EUR.")
+        rd4.metric("Simple return on deployed", f"{simple_on_deployed:+.2f}%",
+                   help="Total P&L ÷ gross capital deployed (all buys), in EUR.")
+
+        st.markdown("---")
+
+        # Period returns grid
+        prets = mt.period_returns_table(twr_g)
+        cells = []
+        for label, val in prets.items():
+            txt = f"{val*100:+.2f}%" if val is not None else "—"
+            color = "#3ddc97" if (val or 0) >= 0 else "#ff6b81"
+            cells.append(
+                f'<div class="period-cell"><div class="period-label">{label}</div>'
+                f'<div class="period-value" style="color:{color}">{txt}</div></div>'
+            )
+        st.markdown(f'<div class="period-grid">{"".join(cells)}</div>', unsafe_allow_html=True)
+
+        # Risk row
+        ann = mt.annualized_return(twr_g)
+        vol = mt.volatility(twr_g)
+        sh = mt.sharpe(twr_g, rf=rf_rate)
+        mdd = mt.max_drawdown(twr_g)
+        rk1, rk2, rk3, rk4 = st.columns(4)
+        rk1.metric("Annualized TWR", f"{ann*100:.2f}%" if ann is not None else "—")
+        rk2.metric("Volatility (ann.)", f"{vol*100:.2f}%" if vol is not None else "—")
+        rk3.metric("Sharpe ratio", f"{sh:.2f}" if sh is not None else "—",
+                   help=f"rf = {rf_rate*100:.1f}%")
+        rk4.metric("Max drawdown", f"{mdd*100:.2f}%")
+
+        # Portfolio return curve vs benchmark — toggleable (unique key!)
+        chart_mode_g = st.radio(
+            "Return measure for chart",
+            ["TWR (time-weighted)", "Simple return on net cash"],
+            horizontal=True, key="gen_chart_mode",
+        )
+        cum_deposits_curve = cf_series_g.cumsum()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            simple_curve = (value_series_g - cum_deposits_curve) / cum_deposits_curve
+        simple_curve = simple_curve.where(cum_deposits_curve > 1e-6)
+
+        if chart_mode_g.startswith("TWR"):
+            port_y = (twr_g - 1) * 100
+            port_label = "Portfolio (TWR)"
+            sub = f"TWR vs {benchmark}" if benchmark != "None" else "TWR"
+        else:
+            port_y = simple_curve * 100
+            port_label = "Portfolio (simple return on net cash)"
+            sub = f"Simple return vs {benchmark}" if benchmark != "None" else "Simple return"
+
+        st.subheader(sub)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=port_y.index, y=port_y.values, mode="lines",
+            line=dict(color="#3ddc97", width=2.4),
+            fill="tozeroy", fillcolor="rgba(61,220,151,0.08)",
+            name=port_label,
+            hovertemplate="%{x|%Y-%m-%d}<br>%{y:+.2f}%<extra></extra>",
+        ))
+        if not bench_g.empty:
+            fig.add_trace(go.Scatter(
+                x=bench_g.index, y=(bench_g - 1) * 100, mode="lines",
+                line=dict(color="#7c8eff", width=2, dash="dot"),
+                name=benchmark,
+                hovertemplate="%{x|%Y-%m-%d}<br>%{y:+.2f}%<extra></extra>",
+            ))
+        fig.add_hline(y=0, line_dash="dash", line_color="#666")
+        fig.update_layout(height=440, margin=dict(t=10, b=10, l=10, r=10),
+                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                          yaxis_title="% return", xaxis=dict(showgrid=False),
+                          yaxis=dict(gridcolor="#222", zerolinecolor="#444"),
+                          legend=dict(orientation="h", yanchor="bottom", y=1.02))
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Equity curve (€)
+        st.subheader("Equity curve (€)")
+        st.caption("Blue = market value of holdings. Amber = cumulative net cash invested "
+                   "(buys − sells). Gap = mark-to-market total P&L. All in EUR.")
+        cum_capital_curve = cf_series_g.cumsum()
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(
+            x=value_series_g.index, y=value_series_g.values, mode="lines",
+            line=dict(color="#7c8eff", width=2),
+            fill="tozeroy", fillcolor="rgba(124,142,255,0.08)",
+            name="Market value",
+            hovertemplate="%{x|%Y-%m-%d}<br>€%{y:,.0f}<extra>Market value</extra>",
+        ))
+        fig2.add_trace(go.Scatter(
+            x=cum_capital_curve.index, y=cum_capital_curve.values, mode="lines",
+            line=dict(color="#f4b942", width=2, dash="dot"),
+            name="Net capital invested",
+            hovertemplate="%{x|%Y-%m-%d}<br>€%{y:,.0f}<extra>Net capital</extra>",
+        ))
+        fig2.update_layout(height=360, margin=dict(t=10, b=10, l=10, r=10),
+                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                           yaxis_title="€", xaxis=dict(showgrid=False),
+                           yaxis=dict(gridcolor="#222"),
+                           legend=dict(orientation="h", yanchor="bottom", y=1.02))
+        st.plotly_chart(fig2, use_container_width=True)
+
+        # Total P&L over time (€)
+        st.subheader("Total P&L over time (€)")
+        st.caption("Mark-to-market: portfolio value minus net cash invested, in EUR.")
+        cum_deposits = cf_series_g.cumsum()
+        total_pnl_curve = value_series_g - cum_deposits
+        pos = total_pnl_curve.where(total_pnl_curve >= 0)
+        neg = total_pnl_curve.where(total_pnl_curve < 0)
+
+        fig3 = go.Figure()
+        fig3.add_trace(go.Scatter(
+            x=total_pnl_curve.index, y=pos.fillna(0).values,
+            mode="lines", line=dict(color="rgba(0,0,0,0)"),
+            fill="tozeroy", fillcolor="rgba(61,220,151,0.22)",
+            name="Winning", showlegend=False, hoverinfo="skip",
+        ))
+        fig3.add_trace(go.Scatter(
+            x=total_pnl_curve.index, y=neg.fillna(0).values,
+            mode="lines", line=dict(color="rgba(0,0,0,0)"),
+            fill="tozeroy", fillcolor="rgba(255,107,129,0.22)",
+            name="Losing", showlegend=False, hoverinfo="skip",
+        ))
+        fig3.add_trace(go.Scatter(
+            x=total_pnl_curve.index, y=total_pnl_curve.values,
+            mode="lines", line=dict(color="#e8edf5", width=2),
+            name="Total P&L",
+            hovertemplate="%{x|%Y-%m-%d}<br>€%{y:,.0f}<extra></extra>",
+        ))
+        fig3.add_hline(y=0, line_dash="dash", line_color="#666")
+        peak_idx = total_pnl_curve.idxmax()
+        trough_idx = total_pnl_curve.idxmin()
+        fig3.add_trace(go.Scatter(
+            x=[peak_idx, trough_idx],
+            y=[total_pnl_curve.loc[peak_idx], total_pnl_curve.loc[trough_idx]],
+            mode="markers+text",
+            marker=dict(size=10, color=["#3ddc97", "#ff6b81"],
+                        line=dict(color="#0e1117", width=2)),
+            text=[f"Peak €{total_pnl_curve.loc[peak_idx]:,.0f}",
+                  f"Trough €{total_pnl_curve.loc[trough_idx]:,.0f}"],
+            textposition=["top center", "bottom center"],
+            textfont=dict(color="#e8edf5"),
+            showlegend=False, hoverinfo="skip",
+        ))
+        fig3.update_layout(height=380, margin=dict(t=20, b=10, l=10, r=10),
+                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                           yaxis_title="€ P&L", xaxis=dict(showgrid=False),
+                           yaxis=dict(gridcolor="#222", zerolinecolor="#666"))
+        st.plotly_chart(fig3, use_container_width=True)
+
+        pk1, pk2, pk3, pk4 = st.columns(4)
+        pk1.metric("Current P&L", f"€{total_pnl_curve.iloc[-1]:,.0f}")
+        pk2.metric("Peak P&L", f"€{total_pnl_curve.loc[peak_idx]:,.0f}",
+                   help=f"on {peak_idx.date()}")
+        pk3.metric("Trough P&L", f"€{total_pnl_curve.loc[trough_idx]:,.0f}",
+                   help=f"on {trough_idx.date()}")
+        pk4.metric("Days winning",
+                   f"{int((total_pnl_curve >= 0).sum())} / {len(total_pnl_curve)}")
+
+
+if IS_GENERAL:
+    render_general(tx_all, present_classes)
+    st.stop()
 
 symbols = tuple(positions["symbol"].tolist())
 quotes = get_quotes(symbols) if use_live else {}
