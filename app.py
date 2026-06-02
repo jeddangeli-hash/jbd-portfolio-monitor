@@ -1492,7 +1492,11 @@ with tab_today:
     def _rsi_str(sym: str) -> str:
         if not isinstance(hist, pd.DataFrame) or hist.empty or sym not in hist.columns:
             return "—"
-        v = mt.compute_rsi(hist[sym], 14)
+        try:
+            v = mt.compute_rsi(hist[sym], 14)
+        except Exception:
+            # One bad/odd-dtype symbol must not crash the whole Detail table.
+            return "—"
         return f"{v:.0f}" if v is not None else "—"
     td = td.copy()
     td["RSI"] = td["symbol"].map(_rsi_str)

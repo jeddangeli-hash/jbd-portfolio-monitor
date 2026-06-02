@@ -221,18 +221,34 @@ def compute_rsi(close: pd.Series, period: int = 14) -> float | None:
     Standard 14-period RSI: gains/losses smoothed with Wilder's moving average
     (an EMA with alpha = 1/period). Returns None when there are fewer than
     period+1 valid observations, or 100.0 when there are no losses in-window.
+
+    Collapses the input to a plain float64 numpy array up front and does all
+    math in numpy. The price history can arrive as a pyarrow-backed Series
+    (e.g. on Streamlit Cloud, where the pandas/Arrow build differs); calling
+    pandas methods like .diff()/pd.to_numeric directly on such a Series can
+    raise AttributeError from pandas' arrow/array.py. Working in numpy keeps
+    RSI dtype-agnostic and never touches an ExtensionArray method.
     """
-    s = pd.to_numeric(close, errors="coerce").dropna()
-    if len(s) < period + 1:
+    if close is None:
         return None
-    delta = s.diff().dropna().to_numpy()
-    gain = delta.clip(min=0.0)
-    loss = (-delta).clip(min=0.0)
+    if isinstance(close, pd.DataFrame):
+        # Defensive: duplicate columns make hist[sym] a DataFrame, not a Series.
+        close = close.iloc[:, 0] if close.shape[1] else pd.Series(dtype="float64")
+    s = close if isinstance(close, pd.Series) else pd.Series(close)
+    # na_value=np.nan maps pd.NA -> nan so the dtype is a genuine float64 array,
+    # regardless of whether s is numpy- or arrow-backed.
+    arr = s.to_numpy(dtype="float64", na_value=np.nan)
+    arr = arr[~np.isnan(arr)]
+    if arr.size < period + 1:
+        return None
+    delta = np.diff(arr)
+    gain = np.clip(delta, 0.0, None)
+    loss = np.clip(-delta, 0.0, None)
     # Canonical Wilder: seed the averages with the SMA of the first `period`
     # gains/losses, then apply Wilder's recursive smoothing for the rest.
-    avg_gain = gain[:period].mean()
-    avg_loss = loss[:period].mean()
-    for i in range(period, len(gain)):
+    avg_gain = float(gain[:period].mean())
+    avg_loss = float(loss[:period].mean())
+    for i in range(period, gain.size):
         avg_gain = (avg_gain * (period - 1) + gain[i]) / period
         avg_loss = (avg_loss * (period - 1) + loss[i]) / period
     if avg_loss == 0:
