@@ -68,11 +68,25 @@ def _check_password() -> bool:
     Fails closed: if `app_password` is missing the app renders nothing, so a
     typo'd or dropped secret can never silently publish the portfolio.
     """
-    expected = st.secrets.get("app_password")
+    # st.secrets raises (not returns None) when no secrets file can be loaded,
+    # so the whole read is guarded — a missing file must show the same friendly
+    # message as a missing key, never a traceback.
+    try:
+        expected = st.secrets.get("app_password")
+        visible = sorted(st.secrets.keys())
+    except Exception:
+        expected, visible = None, []
+
     if not expected:
         st.error(
             "🔒 `app_password` is not set. Add it in Streamlit Cloud → Settings → "
             "Secrets, or in `.streamlit/secrets.toml` when running locally."
+        )
+        # Key names only, never values: tells us typo vs. TOML-nesting vs.
+        # secrets-not-loaded without exposing anything sensitive.
+        st.caption(
+            "Top-level keys Streamlit can currently see: "
+            + (", ".join(f"`{k}`" for k in visible) if visible else "_none_")
         )
         return False
 
