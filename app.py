@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 from datetime import date, datetime
 from pathlib import Path
 
@@ -58,6 +59,44 @@ h1, h2, h3 { font-weight: 600; letter-spacing: -0.01em; }
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
+
+# ---------- Auth gate --------------------------------------------------------
+
+def _check_password() -> bool:
+    """Return True once the visitor has entered the password from secrets.
+
+    Fails closed: if `app_password` is missing the app renders nothing, so a
+    typo'd or dropped secret can never silently publish the portfolio.
+    """
+    expected = st.secrets.get("app_password")
+    if not expected:
+        st.error(
+            "🔒 `app_password` is not set. Add it in Streamlit Cloud → Settings → "
+            "Secrets, or in `.streamlit/secrets.toml` when running locally."
+        )
+        return False
+
+    if st.session_state.get("auth_ok"):
+        return True
+
+    def _submit() -> None:
+        # compare_digest: constant-time, so timing can't leak the password.
+        if hmac.compare_digest(st.session_state["auth_pw"], str(expected)):
+            st.session_state["auth_ok"] = True
+            del st.session_state["auth_pw"]  # never keep the typed password
+        else:
+            st.session_state["auth_ok"] = False
+
+    st.markdown("## 🔒 JBD Portfolio Monitor")
+    st.text_input("Password", type="password", key="auth_pw", on_change=_submit)
+    if st.session_state.get("auth_ok") is False:
+        st.error("Wrong password.")
+    return False
+
+
+if not _check_password():
+    st.stop()
+
 
 # ---------- Sidebar ----------------------------------------------------------
 
