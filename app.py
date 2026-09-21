@@ -260,6 +260,19 @@ def load_tx(path_or_buf) -> pd.DataFrame:
 # Collect every uploaded file with its asset-class tag. If nothing is uploaded,
 # fall back to the bundled stocks CSV so behaviour matches the single-file app.
 ASSET_LABELS = {"stocks": "Stocks", "etf": "ETF", "crypto": "Crypto", "bond": "Bond"}
+# Identity hues for the per-class breakdown lines, stepped for the dark chart
+# surface (#0e1117) and checked with the dataviz all-pairs validator: every pair
+# clears the CVD and normal-vision separation floors. Only the three CSV classes
+# get a hue — the bond has no price history so it never draws a time series, and
+# no fourth hue in this lightness band clears the all-pairs floor. Green and red
+# stay reserved for win/loss polarity and are never identity colours.
+CLASS_COLORS = {"stocks": "#3987e5", "etf": "#199e70", "crypto": "#d95926"}
+# Streamlit picks light or dark from the viewer's browser and st.context.theme is
+# documented as unreliable on first load, so this chart's non-data ink has to read
+# on both surfaces. Both clear 3:1 against #ffffff and against #0e1117, unlike the
+# app's usual #e8edf5 (1.18:1 on white — invisible in the light theme).
+INK_NEUTRAL = "#6b7280"
+GRID_NEUTRAL = "rgba(128,128,128,0.25)"
 _sources: list[tuple[object, str]] = []
 if stocks_file is not None:
     _sources.append((stocks_file, "stocks"))
@@ -375,6 +388,29 @@ def get_fx_rate(pair: str) -> float | None:
     q = pr.fetch_quotes([pair])
     rate = q.get(pair, {}).get("price")
     return float(rate) if rate else None
+
+
+def _stagger_labels(points: list[tuple[float, str]], y_span: float,
+                    plot_px: int, min_gap_px: int = 15) -> list[tuple[float, str, int]]:
+    """Greedy vertical de-collision for end-of-line direct labels.
+
+    points: (y_value, text) in any order. Returns each with a pixel yshift that
+    keeps labels at least min_gap_px apart, so two classes finishing at similar
+    P&L don't stack their names on top of each other at the right edge.
+    """
+    if not points:
+        return []
+    if y_span <= 0:
+        return [(y, t, 0) for y, t in points]
+    px_per_unit = plot_px / y_span
+    out: list[tuple[float, str, int]] = []
+    last_final = None
+    for y, t in sorted(points, key=lambda p: -p[0]):
+        py = y * px_per_unit
+        final = py if last_final is None else min(py, last_final - min_gap_px)
+        out.append((y, t, int(round(final - py))))
+        last_final = final
+    return out
 
 
 def _bond_position_row(bond) -> dict:
@@ -819,34 +855,75 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
                            legend=dict(orientation="h", yanchor="bottom", y=1.02))
         st.plotly_chart(fig2, use_container_width=True)
 
-        # Total P&L over time (€)
+        # Total P&L over time (€) — aggregate plus one line per asset class.
         st.subheader("Total P&L over time (€)")
-        st.caption("Mark-to-market: portfolio value minus net cash invested, in EUR.")
+        st.caption("Mark-to-market: portfolio value minus net cash invested, in EUR. "
+                   "The grey line is the aggregate; coloured lines split it by asset "
+                   "class and always sum back to it. Add or remove classes with the "
+                   "**asset-class filter at the top of this page**.")
         cum_deposits = cf_series_g.cumsum()
         total_pnl_curve = value_series_g - cum_deposits
+
+        # Per-class curves. Each class is rebuilt from its own transactions and its
+        # own price columns over the FULL history index — the cumsum must span all
+        # of history or a class silently loses the cash it spent before the window
+        # (the same trap build_value_series' opening_cash closes for the aggregate).
+        # Sliced to the aggregate's index only afterwards, so the parts sum to the
+        # whole. A symbol held in two classes shares a price column but keeps its
+        # own quantities, matching the (symbol, asset_class) grain used above.
+        class_pnl: dict[str, pd.Series] = {}
+        mv_by_class = oc.groupby("asset_class")["market_value_eur"].sum()
+        for cls in csv_classes:
+            cls_tx = tx_eur[tx_eur["asset_class"] == cls]
+            cls_syms = [s for s in hist_eur.columns if s in set(cls_tx["symbol"])]
+            if cls_tx.empty or not cls_syms:
+                continue
+            v_c, cf_c = mt.build_value_series(cls_tx, hist_eur[cls_syms])
+            cum_c = cf_c.cumsum()
+            pnl_c = (v_c - cum_c).reindex(total_pnl_curve.index)
+            # Mirror the aggregate's terminal pin with this class's live EUR market
+            # value, so the class endpoints still add up to the pinned total.
+            mv_c = float(mv_by_class.get(cls, 0.0))
+            if mv_c > 0:
+                pnl_c.iloc[-1] = mv_c - float(cum_c.iloc[-1])
+            class_pnl[cls] = pnl_c
+        # With one class selected the breakdown would just redraw the total line.
+        show_breakdown = len(class_pnl) > 1
+
         pos = total_pnl_curve.where(total_pnl_curve >= 0)
         neg = total_pnl_curve.where(total_pnl_curve < 0)
+        # Lighten the polarity fill when class lines sit on top of it, so the
+        # identity hues stay legible against it.
+        fill_a = 0.10 if show_breakdown else 0.22
 
         fig3 = go.Figure()
         fig3.add_trace(go.Scatter(
             x=total_pnl_curve.index, y=pos.fillna(0).values,
             mode="lines", line=dict(color="rgba(0,0,0,0)"),
-            fill="tozeroy", fillcolor="rgba(61,220,151,0.22)",
+            fill="tozeroy", fillcolor=f"rgba(61,220,151,{fill_a})",
             name="Winning", showlegend=False, hoverinfo="skip",
         ))
         fig3.add_trace(go.Scatter(
             x=total_pnl_curve.index, y=neg.fillna(0).values,
             mode="lines", line=dict(color="rgba(0,0,0,0)"),
-            fill="tozeroy", fillcolor="rgba(255,107,129,0.22)",
+            fill="tozeroy", fillcolor=f"rgba(255,107,129,{fill_a})",
             name="Losing", showlegend=False, hoverinfo="skip",
         ))
+        if show_breakdown:
+            for cls, s_cls in class_pnl.items():
+                fig3.add_trace(go.Scatter(
+                    x=s_cls.index, y=s_cls.values, mode="lines",
+                    line=dict(color=CLASS_COLORS[cls], width=2),
+                    name=ASSET_LABELS[cls],
+                    hovertemplate="€%{y:,.0f}<extra>" + ASSET_LABELS[cls] + "</extra>",
+                ))
         fig3.add_trace(go.Scatter(
             x=total_pnl_curve.index, y=total_pnl_curve.values,
-            mode="lines", line=dict(color="#e8edf5", width=2),
-            name="Total P&L",
-            hovertemplate="%{x|%Y-%m-%d}<br>€%{y:,.0f}<extra></extra>",
+            mode="lines", line=dict(color=INK_NEUTRAL, width=2.4),
+            name="Total",
+            hovertemplate="€%{y:,.0f}<extra>Total</extra>",
         ))
-        fig3.add_hline(y=0, line_dash="dash", line_color="#666")
+        fig3.add_hline(y=0, line_dash="dash", line_color="#888")
         peak_idx = total_pnl_curve.idxmax()
         trough_idx = total_pnl_curve.idxmin()
         fig3.add_trace(go.Scatter(
@@ -855,16 +932,35 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
             mode="markers+text",
             marker=dict(size=10, color=["#3ddc97", "#ff6b81"],
                         line=dict(color="#0e1117", width=2)),
-            text=[f"Peak €{total_pnl_curve.loc[peak_idx]:,.0f}",
-                  f"Trough €{total_pnl_curve.loc[trough_idx]:,.0f}"],
+            text=["" if peak_idx == total_pnl_curve.index[-1]
+                  else f"Peak €{total_pnl_curve.loc[peak_idx]:,.0f}",
+                  "" if trough_idx == total_pnl_curve.index[-1]
+                  else f"Trough €{total_pnl_curve.loc[trough_idx]:,.0f}"],
             textposition=["top center", "bottom center"],
-            textfont=dict(color="#e8edf5"),
+            textfont=dict(color=INK_NEUTRAL),
             showlegend=False, hoverinfo="skip",
         ))
-        fig3.update_layout(height=380, margin=dict(t=20, b=10, l=10, r=10),
+        # Direct end-labels so a series' identity never rests on colour alone,
+        # staggered because two classes can finish at nearly the same P&L.
+        if show_breakdown:
+            ends = [(float(total_pnl_curve.iloc[-1]), "Total")]
+            ends += [(float(s_cls.iloc[-1]), ASSET_LABELS[c])
+                     for c, s_cls in class_pnl.items() if pd.notna(s_cls.iloc[-1])]
+            stacked = pd.concat([total_pnl_curve] + list(class_pnl.values()))
+            y_span = float(stacked.max() - stacked.min())
+            for y_end, txt, shift in _stagger_labels(ends, y_span, plot_px=300):
+                fig3.add_annotation(
+                    x=total_pnl_curve.index[-1], y=y_end, yshift=shift,
+                    text=txt, showarrow=False, xanchor="left", xshift=8,
+                    font=dict(color="#e8edf5", size=11),
+                    bgcolor="rgba(14,17,23,0.75)", borderpad=2,
+                )
+        fig3.update_layout(height=430, margin=dict(t=20, b=10, l=10, r=78),
                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                            yaxis_title="€ P&L", xaxis=dict(showgrid=False),
-                           yaxis=dict(gridcolor="#222", zerolinecolor="#666"))
+                           yaxis=dict(gridcolor=GRID_NEUTRAL, zerolinecolor="#888"),
+                           hovermode="x unified",
+                           legend=dict(orientation="h", yanchor="bottom", y=1.02))
         st.plotly_chart(fig3, use_container_width=True)
 
         pk1, pk2, pk3, pk4 = st.columns(4)
@@ -875,6 +971,31 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
                    help=f"on {trough_idx.date()}")
         pk4.metric("Days winning",
                    f"{int((total_pnl_curve >= 0).sum())} / {len(total_pnl_curve)}")
+
+        # Table-view twin for the class lines (the metrics above cover the total).
+        if show_breakdown:
+            rows_p = []
+            for cls, s_cls in class_pnl.items():
+                sv = s_cls.dropna()
+                if sv.empty:
+                    continue
+                rows_p.append({
+                    "Class": ASSET_LABELS[cls],
+                    "Current (€)": float(sv.iloc[-1]),
+                    "Peak (€)": float(sv.max()),
+                    "Trough (€)": float(sv.min()),
+                    "Days winning": f"{int((sv >= 0).sum())} / {len(sv)}",
+                })
+            st.dataframe(
+                pd.DataFrame(rows_p), hide_index=True, use_container_width=True,
+                column_config={
+                    "Current (€)": st.column_config.NumberColumn(format="€%.0f"),
+                    "Peak (€)": st.column_config.NumberColumn(format="€%.0f"),
+                    "Trough (€)": st.column_config.NumberColumn(format="€%.0f"),
+                },
+            )
+            st.caption("Class lines sum to the aggregate. The bond is absent — it has "
+                       "no price history, so it carries no time series.")
 
 
 def render_bond_view(bond, inflation_pct: float) -> None:

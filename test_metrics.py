@@ -151,3 +151,53 @@ def test_symbols_absent_from_history_are_skipped_on_both_sides():
     )
     assert cf.sum() == pytest.approx(100_000.0)
     assert v.iloc[-1] == pytest.approx(91_859.0)
+
+
+# --------------------------------------------------------------------------
+# Per-class breakdown (Generale "Total P&L over time"): the class curves are
+# built independently, so they must still sum to the aggregate curve exactly.
+# --------------------------------------------------------------------------
+
+def _pnl(tx: pd.DataFrame, hist: pd.DataFrame) -> pd.Series:
+    v, cf = mt.build_value_series(tx, hist)
+    return v - cf.cumsum()
+
+
+def test_per_class_pnl_curves_sum_to_the_aggregate():
+    tx = pd.concat([
+        _tx([("BTC-USD", "2024-01-10", "BUY", 1.0, 100_000.0)]).assign(asset_class="crypto"),
+        _tx([("AAPL", "2025-09-22", "BUY", 10.0, 200.0),
+             ("AAPL", "2025-09-23", "SELL", 4.0, 220.0)]).assign(asset_class="stocks"),
+    ], ignore_index=True)
+    hist = pd.DataFrame(
+        {"BTC-USD": [60_000.0, 55_000.0, 91_859.0], "AAPL": [210.0, 215.0, 190.0]},
+        index=pd.date_range("2025-09-21", periods=3, freq="D"),
+    )
+
+    agg = _pnl(tx, hist)
+    parts = [
+        _pnl(sub, hist[[s for s in hist.columns if s in set(sub["symbol"])]])
+        for _, sub in tx.groupby("asset_class")
+    ]
+    summed = sum(parts[1:], parts[0])
+    assert summed.tolist() == pytest.approx(agg.tolist())
+    # And the aggregate still reflects the pre-window crypto cost basis.
+    assert agg.iloc[-1] == pytest.approx(-8_141.0 + (6 * 190.0 - (10 * 200.0 - 4 * 220.0)))
+
+
+def test_symbol_held_in_two_classes_does_not_merge():
+    """Same ticker in two classes: each keeps its own qty, both share the price."""
+    tx = pd.concat([
+        _tx([("BTC-USD", "2025-09-22", "BUY", 1.0, 50_000.0)]).assign(asset_class="crypto"),
+        _tx([("BTC-USD", "2025-09-22", "BUY", 2.0, 50_000.0)]).assign(asset_class="etf"),
+    ], ignore_index=True)
+    hist = _hist([60_000.0, 91_859.0])
+
+    agg = _pnl(tx, hist)
+    parts = [
+        _pnl(sub, hist[[s for s in hist.columns if s in set(sub["symbol"])]])
+        for _, sub in tx.groupby("asset_class")
+    ]
+    assert sum(parts[1:], parts[0]).tolist() == pytest.approx(agg.tolist())
+    # 3 BTC bought at 50k, marked at 91,859.
+    assert agg.iloc[-1] == pytest.approx(3 * 91_859.0 - 3 * 50_000.0)
