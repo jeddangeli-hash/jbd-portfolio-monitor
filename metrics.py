@@ -14,6 +14,12 @@ def build_value_series(tx: pd.DataFrame, hist: pd.DataFrame) -> tuple[pd.Series,
     tx:   transactions DF from portfolio.load_transactions.
 
     Returns (value_series, cashflow_series) aligned to hist.index.
+
+    Transactions that predate hist.index[0] are replayed into both the opening
+    quantities AND the first bar's cashflow, so cashflow_series.cumsum() is the
+    net cash invested since inception rather than since the window edge. Without
+    the cash half, a position bought before the window looks free and
+    `value - cumsum()` reports the whole market value as profit.
     """
     if hist.empty:
         return pd.Series(dtype=float), pd.Series(dtype=float)
@@ -34,11 +40,16 @@ def build_value_series(tx: pd.DataFrame, hist: pd.DataFrame) -> tuple[pd.Series,
             "signed_qty": float(r["signed_qty"]),
         })
 
+    # Warm-up: everything traded before the window. Net cash carries onto the
+    # first bar (see docstring); TWR is unaffected because twr_curve and the
+    # daily_* helpers never read element 0 of the cashflow series.
     hist_start = hist.index[0].date()
+    opening_cash = 0.0
     for d in sorted(tx_by_date.keys()):
         if d < hist_start:
             for r in tx_by_date[d]:
                 if r["symbol"] in qty:
+                    opening_cash += r["qty"] * r["price"] * (1.0 if r["side"] == "BUY" else -1.0)
                     qty[r["symbol"]] += r["signed_qty"]
 
     values, cashflows = [], []
@@ -57,7 +68,27 @@ def build_value_series(tx: pd.DataFrame, hist: pd.DataFrame) -> tuple[pd.Series,
         values.append(v)
         cashflows.append(cf)
 
+    cashflows[0] += opening_cash
+
     return pd.Series(values, index=hist.index, name="value"), pd.Series(cashflows, index=hist.index, name="cashflow")
+
+
+def trim_to_first_holding(values: pd.Series, cashflows: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """Drop leading bars where nothing was held, preserving total net cash.
+
+    Cash spent before the first valued bar (a pre-window buy whose price column
+    only starts later) is folded into the new first bar, so
+    cashflows.cumsum() stays inception-to-date and `values - cumsum()` stays
+    true P&L. Returns the inputs unchanged when the series was never positive.
+    """
+    if values.empty or not (values > 0).any():
+        return values, cashflows
+    first_idx = values[values > 0].index[0]
+    dropped = float(cashflows.loc[:first_idx].sum() - cashflows.loc[first_idx])
+    values = values.loc[first_idx:]
+    cashflows = cashflows.loc[first_idx:].copy()
+    cashflows.iloc[0] += dropped
+    return values, cashflows
 
 
 def twr_curve(values: pd.Series, cashflows: pd.Series) -> pd.Series:

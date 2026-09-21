@@ -60,3 +60,94 @@ def test_rsi_dataframe_uses_first_column():
     assert mt.compute_rsi(df, 14) == pytest.approx(
         mt.compute_rsi(pd.Series(p), 14)
     )
+
+
+# --------------------------------------------------------------------------
+# build_value_series: net cash must be inception-to-date, not window-to-date.
+# A position bought before hist.index[0] used to contribute market value with
+# zero cost, so `value - cashflow.cumsum()` reported the whole position as
+# profit (a -8,141 book charted as +91,859).
+# --------------------------------------------------------------------------
+
+def _tx(rows: list[tuple[str, str, str, float, float]]) -> pd.DataFrame:
+    """rows: (symbol, iso_date, side, qty, price)."""
+    return pd.DataFrame([
+        {"symbol": s, "trade_date": pd.Timestamp(d), "side": side,
+         "qty": q, "price": px, "signed_qty": q if side == "BUY" else -q}
+        for s, d, side, q, px in rows
+    ])
+
+
+def _hist(prices: list[float], start: str = "2025-09-21", sym: str = "BTC-USD") -> pd.DataFrame:
+    return pd.DataFrame({sym: prices},
+                        index=pd.date_range(start, periods=len(prices), freq="D"))
+
+
+def test_pnl_curve_matches_true_pnl_for_position_bought_before_window():
+    """The reported bug: 1 BTC at 100k, history window starts a year later."""
+    v, cf = mt.build_value_series(
+        _tx([("BTC-USD", "2024-01-10", "BUY", 1.0, 100_000.0)]),
+        _hist([60_000.0, 55_000.0, 91_859.0]),
+    )
+    pnl = v - cf.cumsum()
+    assert pnl.iloc[-1] == pytest.approx(-8_141.0)
+    assert pnl.iloc[0] == pytest.approx(-40_000.0)
+
+
+def test_pre_window_sells_net_against_pre_window_buys():
+    """Opening cash is net (buys - sells), not gross cost."""
+    v, cf = mt.build_value_series(
+        _tx([("BTC-USD", "2024-01-10", "BUY", 2.0, 100_000.0),
+             ("BTC-USD", "2024-06-10", "SELL", 1.0, 120_000.0)]),
+        _hist([90_000.0, 91_859.0]),
+    )
+    assert cf.cumsum().iloc[-1] == pytest.approx(80_000.0)   # 200k out, 120k back
+    assert (v - cf.cumsum()).iloc[-1] == pytest.approx(11_859.0)
+
+
+def test_in_window_transactions_still_counted_once():
+    """Regression guard: the warm-up must not double-count same-window buys."""
+    v, cf = mt.build_value_series(
+        _tx([("BTC-USD", "2025-09-22", "BUY", 1.0, 50_000.0)]),
+        _hist([60_000.0, 55_000.0, 91_859.0]),
+    )
+    assert cf.tolist() == pytest.approx([0.0, 50_000.0, 0.0])
+    assert (v - cf.cumsum()).iloc[-1] == pytest.approx(41_859.0)
+
+
+def test_opening_cash_does_not_distort_twr():
+    """TWR ignores element 0 of the cashflow series — it must stay unchanged."""
+    tx = _tx([("BTC-USD", "2024-01-10", "BUY", 1.0, 100_000.0)])
+    hist = _hist([60_000.0, 55_000.0, 91_859.0])
+    v, cf = mt.build_value_series(tx, hist)
+    twr = mt.twr_curve(v, cf)
+    # Pure price path 60k -> 55k -> 91,859, no flows inside the window.
+    assert float(twr.iloc[-1]) == pytest.approx(91_859.0 / 60_000.0)
+
+
+def test_trim_to_first_holding_preserves_total_cash():
+    """A pre-window buy whose price column starts late keeps its cost basis."""
+    v = pd.Series([0.0, 0.0, 91_859.0], index=pd.date_range("2025-09-21", periods=3))
+    cf = pd.Series([100_000.0, 0.0, 0.0], index=v.index)
+    v2, cf2 = mt.trim_to_first_holding(v, cf)
+    assert len(v2) == 1
+    assert cf2.sum() == pytest.approx(100_000.0)
+    assert (v2 - cf2.cumsum()).iloc[-1] == pytest.approx(-8_141.0)
+
+
+def test_trim_to_first_holding_noop_when_never_positive():
+    v = pd.Series([0.0, 0.0], index=pd.date_range("2025-09-21", periods=2))
+    cf = pd.Series([0.0, 0.0], index=v.index)
+    v2, cf2 = mt.trim_to_first_holding(v, cf)
+    assert v2.equals(v) and cf2.equals(cf)
+
+
+def test_symbols_absent_from_history_are_skipped_on_both_sides():
+    """No price column -> neither its value nor its cash enters the series."""
+    v, cf = mt.build_value_series(
+        _tx([("BTC-USD", "2024-01-10", "BUY", 1.0, 100_000.0),
+             ("DOGE-USD", "2024-01-10", "BUY", 1000.0, 0.30)]),
+        _hist([91_859.0]),
+    )
+    assert cf.sum() == pytest.approx(100_000.0)
+    assert v.iloc[-1] == pytest.approx(91_859.0)

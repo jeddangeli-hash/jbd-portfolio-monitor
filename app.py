@@ -684,9 +684,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     if not hist_eur.empty:
         value_series_g, cf_series_g = mt.build_value_series(tx_eur, hist_eur)
         if not value_series_g.empty and (value_series_g > 0).any():
-            first_idx = value_series_g[value_series_g > 0].index[0]
-            value_series_g = value_series_g.loc[first_idx:]
-            cf_series_g = cf_series_g.loc[first_idx:]
+            value_series_g, cf_series_g = mt.trim_to_first_holding(value_series_g, cf_series_g)
             # Pin the last point to the CSV-only EUR market value (bond excluded
             # from the series) so the curve matches the tradeable portfolio.
             if csv_mv_eur > 0:
@@ -1026,10 +1024,9 @@ value_series = pd.Series(dtype=float)
 if not hist.empty:
     value_series, cf_series = mt.build_value_series(tx, hist)
     if not value_series.empty and (value_series > 0).any():
-        # Trim leading zeros (before first holding)
-        first_idx = value_series[value_series > 0].index[0]
-        value_series = value_series.loc[first_idx:]
-        cf_series = cf_series.loc[first_idx:]
+        # Trim leading zeros (before first holding); pre-window cash is carried
+        # onto the new first bar so cf_series.cumsum() stays inception-to-date.
+        value_series, cf_series = mt.trim_to_first_holding(value_series, cf_series)
         # Pin today's bar to the live mark-to-market so the chart matches the
         # top KPI's "Day Change". yfinance historical Close for today can be
         # stale (ffilled), partial intraday, or missing for foreign/illiquid
