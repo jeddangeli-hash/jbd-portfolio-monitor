@@ -1,0 +1,28 @@
+[client]
+# Hide the "Deploy" button and developer menu entries for viewers.
+toolbarMode = "minimal"
+
+[theme]
+base = "dark"
+primaryColor = "#4f8cff"
+backgroundColor = "#0b0f17"
+secondaryBackgroundColor = "#141b27"
+textColor = "#e6ebf2"
+borderColor = "#232c3b"
+linkColor = "#7aa7ff"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseRadius = "10px"
+buttonRadius = "10px"
+showWidgetBorder = true
+showSidebarBorder = true
+metricValueFontWeight = 600
+greenColor = "#22c55e"
+redColor = "#f43f5e"
+dataframeHeaderBackgroundColor = "#111723"
+chartCategoricalColors = ["#4f8cff", "#22c3a6", "#f5a524", "#a78bfa", "#f472b6", "#38bdf8", "#fb7185", "#a3e635", "#facc15", "#94a3b8"]
+
+[theme.sidebar]
+backgroundColor = "#0f141e"
+secondaryBackgroundColor = "#161e2b"
