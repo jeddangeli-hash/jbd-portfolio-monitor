@@ -1,7 +1,7 @@
 """Streamlit dashboard — portfolio monitor. Inspired by Portfolio Performance feature set."""
 from __future__ import annotations
 
-import base64
+import io
 import hmac
 from datetime import date, datetime
 from pathlib import Path
@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import requests
 import streamlit as st
 
 import portfolio as pf
@@ -18,6 +17,7 @@ import prices as pr
 import metrics as mt
 import tax
 import bonds
+import storage
 
 # ---------- Page config ------------------------------------------------------
 
@@ -114,124 +114,158 @@ if not _check_password():
 
 # ---------- Sidebar ----------------------------------------------------------
 
-DEFAULT_CSV = Path(__file__).parent / "data" / "portfolio.csv"
+ASSET_LABELS = {"stocks": "Stocks", "etf": "ETF", "crypto": "Crypto", "bond": "Bond"}
+
+
+@st.cache_data(show_spinner=False)
+def load_tx(content: bytes) -> pd.DataFrame:
+    return pf.load_transactions(io.BytesIO(content))
+
+
+def _holdings_summary(content: bytes) -> str:
+    try:
+        df = load_tx(content)
+    except Exception as e:  # noqa: BLE001 — a bad saved file must not break the sidebar
+        return f"⚠️ file non leggibile: {e}"
+    last = df["trade_date"].max()
+    last_txt = last.strftime("%d/%m/%Y") if pd.notna(last) else "—"
+    return f"{df['symbol'].nunique()} titoli · ultima operazione {last_txt}"
+
+
+# One saved CSV per class, loaded automatically (GitHub when configured, else
+# data/<class>.csv). Cached in session_state so Streamlit's reruns don't hit
+# GitHub on every click; a save updates the cache directly.
+GH_CFG = storage.github_config(st.secrets)
+saved_csv: dict[str, bytes | None] = st.session_state.setdefault("saved_csv", {})
+for _cls in storage.CLASSES:
+    if _cls not in saved_csv:
+        try:
+            saved_csv[_cls] = storage.load(_cls, GH_CFG)
+        except Exception as e:  # noqa: BLE001 — not cached, so the next rerun retries
+            st.sidebar.error(f"{ASSET_LABELS[_cls]}: {e}")
+
+
+def _holdings_slot(cls: str) -> None:
+    """Saved file with an ✖ to replace it; an uploader when empty or replacing.
+
+    ✖ only opens the uploader — the saved file is overwritten when (and only
+    when) a new, valid CSV is uploaded, so an accidental ✖ loses nothing.
+    """
+    label = ASSET_LABELS[cls]
+    content = saved_csv.get(cls)
+    replace_key = f"replace_{cls}"
+    if content is not None and not st.session_state.get(replace_key):
+        c1, c2 = st.columns([5, 1])
+        c1.markdown(f"📄 **{label}**  \n<small>{_holdings_summary(content)}</small>",
+                    unsafe_allow_html=True)
+        if c2.button("✖", key=f"x_{cls}", help=f"Sostituisci il file {label} con uno nuovo"):
+            st.session_state[replace_key] = True
+            st.rerun()
+        return
+
+    # Bumping the key after a save resets the uploader to empty.
+    n_key = f"up_n_{cls}"
+    up = st.file_uploader(f"{label} CSV", type=["csv"],
+                          key=f"up_{cls}_{st.session_state.get(n_key, 0)}")
+    if up is not None:
+        data = up.getvalue()
+        try:
+            pf.load_transactions(io.BytesIO(data))  # validate before overwriting
+        except Exception as e:  # noqa: BLE001
+            st.error(f"File non valido: {e}")
+        else:
+            try:
+                storage.save(cls, data, GH_CFG)
+            except Exception as e:  # noqa: BLE001
+                st.error(str(e))
+            else:
+                saved_csv[cls] = data
+                st.session_state[replace_key] = False
+                st.session_state[n_key] = st.session_state.get(n_key, 0) + 1
+                st.session_state["flash"] = f"{label}: salvato «{up.name}»."
+                st.rerun()
+    if content is not None and st.button("Annulla", key=f"cancel_{cls}",
+                                         use_container_width=True):
+        st.session_state[replace_key] = False
+        st.rerun()
+
 
 with st.sidebar:
     st.markdown("### 📊 Portfolio Monitor")
     st.caption("Yahoo CSV → live analytics")
     st.divider()
 
-    # Three optional uploaders, one per asset class. Each takes the same Yahoo
-    # CSV schema (ETF/crypto exports are identical to stocks), so the engine
-    # stays asset-agnostic — we only tag the rows downstream.
-    stocks_file = st.file_uploader("Stocks CSV", type=["csv"], key="up_stocks")
-    etf_file = st.file_uploader("ETF CSV", type=["csv"], key="up_etf")
-    crypto_file = st.file_uploader("Crypto CSV", type=["csv"], key="up_crypto")
-
-    # When deployed to Streamlit Cloud, allow saving the uploaded stocks CSV back
-    # to the GitHub repo so every device sees the latest version. Requires three
-    # secrets configured in Streamlit Cloud (Settings → Secrets):
-    #   github_token = "ghp_..."     # PAT with `repo` scope
-    #   github_repo  = "owner/repo"
-    #   github_path  = "data/portfolio.csv"
-    uploaded = stocks_file  # GitHub save targets the stocks file for now
-    if uploaded is not None:
-        try:
-            token = st.secrets.get("github_token")
-            repo = st.secrets.get("github_repo")
-            path = st.secrets.get("github_path", "data/portfolio.csv")
-            branch = st.secrets.get("github_branch", "main")
-        except Exception:
-            token = repo = path = branch = None
-        if token and repo:
-            if st.button("💾 Save this CSV to GitHub", use_container_width=True,
-                         help="Persists this upload so iPhone + PC + any browser see it on reload"):
-                content = uploaded.getvalue()
-                api = f"https://api.github.com/repos/{repo}/contents/{path}"
-                headers = {"Authorization": f"Bearer {token}",
-                           "Accept": "application/vnd.github+json"}
-                # Fetch current SHA (if file exists) so we can update rather than fail
-                sha = None
-                try:
-                    r = requests.get(api, headers=headers, params={"ref": branch}, timeout=15)
-                    if r.status_code == 200:
-                        sha = r.json().get("sha")
-                except Exception:
-                    pass
-                payload = {
-                    "message": f"Update {path} via app",
-                    "content": base64.b64encode(content).decode(),
-                    "branch": branch,
-                }
-                if sha:
-                    payload["sha"] = sha
-                try:
-                    r = requests.put(api, headers=headers, json=payload, timeout=20)
-                    if r.status_code in (200, 201):
-                        st.success("Saved to GitHub. Reload from any device to see it.")
-                        st.cache_data.clear()
-                    else:
-                        st.error(f"GitHub save failed ({r.status_code}): "
-                                 f"{r.json().get('message', r.text)[:200]}")
-                except Exception as e:
-                    st.error(f"GitHub save error: {e}")
-        elif token is None and repo is None:
-            st.caption("ℹ️ Set `github_token` + `github_repo` in Streamlit secrets "
-                       "to enable cross-device save.")
+    st.markdown("#### 📁 Holdings")
+    if msg := st.session_state.pop("flash", None):
+        st.success(msg)
+    for _cls in storage.CLASSES:
+        _holdings_slot(_cls)
+    if GH_CFG is None:
+        st.caption("ℹ️ Salvataggio solo locale. Imposta `github_token` + `github_repo` "
+                   "(repo **privato**) nei secrets per conservarli tra dispositivi.")
+    st.divider()
     use_live = st.toggle("Fetch live prices", value=True)
     benchmark = st.selectbox("Benchmark", ["SPY", "QQQ", "VTI", "ACWI", "URTH", "None"], index=0)
     period = st.selectbox("History period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
     rf_rate = st.slider("Risk-free rate (Sharpe)", 0.0, 0.10, 0.04, 0.005)
 
-    # ----- Bond / BTP (manual, JSON-persisted) -------------------------------
+    # ----- Bond / BTP (manual, JSON-persisted) — loaded only on demand --------
     BOND_JSON = Path(__file__).parent / "data" / "bond.json"
     st.divider()
     st.markdown("#### 🏛️ Bond / BTP")
-    bond_included = st.checkbox("Includi BTP nel portafoglio", value=True, key="bond_incl")
-    _bd = bonds.load_bond_data(BOND_JSON)
-    inflation_assumed = st.slider("Inflazione assunta (% per YTM nominale)",
-                                  0.0, 8.0, 2.0, 0.1, key="b_infl")
-    with st.expander("Dati BTP", expanded=False):
-        b_isin = st.text_input("ISIN", _bd["isin"], key="b_isin")
-        b_nominal = st.number_input("Nominale (EUR)", value=float(_bd["nominal"]),
-                                    step=1000.0, key="b_nom")
-        b_load = st.number_input("Prezzo medio carico (base 100)", value=float(_bd["price_load"]),
-                                 step=0.01, format="%.4f", key="b_load")
-        # Market price: live-fetchable. Use session_state so the Fetch button can
-        # push a value into the widget without the value=/key= conflict.
-        st.session_state.setdefault("b_market", float(_bd["price_market"]))
-        cpa, cpb = st.columns([2, 1])
-        if cpb.button("Fetch live", help=f"yfinance ISIN {b_isin}"):
-            _q = pr.fetch_quotes([b_isin])
-            _live = _q.get(b_isin, {}).get("price")
-            if _live:
-                st.session_state["b_market"] = round(float(_live), 4)
-                st.success(f"Live {float(_live):.4f}")
-                st.rerun()
-            else:
-                st.warning("Prezzo live non trovato — uso il manuale.")
-        b_market = cpa.number_input("Prezzo mercato (base 100)", step=0.01,
-                                    format="%.4f", key="b_market")
-        b_coupon = st.number_input("Cedola annua reale (%)", value=float(_bd["coupon_pct"]),
-                                   step=0.05, key="b_coupon")
-        b_freq = st.selectbox("Frequenza cedole/anno", [1, 2, 4],
-                              index=[1, 2, 4].index(int(_bd["frequency"])), key="b_freq")
-        b_accrued = st.number_input("Rateo in corso (EUR)", value=float(_bd["accrued"]),
-                                    step=1.0, key="b_accr")
-        b_next = st.date_input("Prossima cedola",
-                               value=date.fromisoformat(str(_bd["next_coupon"])), key="b_next")
-        b_mat = st.date_input("Scadenza",
-                              value=date.fromisoformat(str(_bd["maturity"])), key="b_mat")
-        if st.button("💾 Salva BTP", use_container_width=True):
-            bonds.save_bond_data(BOND_JSON, {
-                "isin": b_isin, "nominal": b_nominal, "price_load": b_load,
-                "price_market": b_market, "coupon_pct": b_coupon, "frequency": b_freq,
-                "accrued": b_accrued, "next_coupon": b_next, "maturity": b_mat,
-                "currency": "EUR"})
-            st.success("BTP salvato.")
-
     bond = None
-    if bond_included:
+    inflation_assumed = 2.0
+    if not st.session_state.get("bond_loaded"):
+        if st.button("🏛️ Carica BTP", use_container_width=True,
+                     help="Aggiunge il BTP al portafoglio (Generale + vista Bond)"):
+            st.session_state["bond_loaded"] = True
+            st.rerun()
+    else:
+        if st.button("Rimuovi BTP dalla vista", use_container_width=True):
+            st.session_state["bond_loaded"] = False
+            st.rerun()
+        _bd = bonds.load_bond_data(BOND_JSON)
+        inflation_assumed = st.slider("Inflazione assunta (% per YTM nominale)",
+                                      0.0, 8.0, 2.0, 0.1, key="b_infl")
+        with st.expander("Dati BTP", expanded=False):
+            b_isin = st.text_input("ISIN", _bd["isin"], key="b_isin")
+            b_nominal = st.number_input("Nominale (EUR)", value=float(_bd["nominal"]),
+                                        step=1000.0, key="b_nom")
+            b_load = st.number_input("Prezzo medio carico (base 100)", value=float(_bd["price_load"]),
+                                     step=0.01, format="%.4f", key="b_load")
+            # Market price: live-fetchable. Use session_state so the Fetch button can
+            # push a value into the widget without the value=/key= conflict.
+            st.session_state.setdefault("b_market", float(_bd["price_market"]))
+            cpa, cpb = st.columns([2, 1])
+            if cpb.button("Fetch live", help=f"yfinance ISIN {b_isin}"):
+                _q = pr.fetch_quotes([b_isin])
+                _live = _q.get(b_isin, {}).get("price")
+                if _live:
+                    st.session_state["b_market"] = round(float(_live), 4)
+                    st.success(f"Live {float(_live):.4f}")
+                    st.rerun()
+                else:
+                    st.warning("Prezzo live non trovato — uso il manuale.")
+            b_market = cpa.number_input("Prezzo mercato (base 100)", step=0.01,
+                                        format="%.4f", key="b_market")
+            b_coupon = st.number_input("Cedola annua reale (%)", value=float(_bd["coupon_pct"]),
+                                       step=0.05, key="b_coupon")
+            b_freq = st.selectbox("Frequenza cedole/anno", [1, 2, 4],
+                                  index=[1, 2, 4].index(int(_bd["frequency"])), key="b_freq")
+            b_accrued = st.number_input("Rateo in corso (EUR)", value=float(_bd["accrued"]),
+                                        step=1.0, key="b_accr")
+            b_next = st.date_input("Prossima cedola",
+                                   value=date.fromisoformat(str(_bd["next_coupon"])), key="b_next")
+            b_mat = st.date_input("Scadenza",
+                                  value=date.fromisoformat(str(_bd["maturity"])), key="b_mat")
+            if st.button("💾 Salva BTP", use_container_width=True):
+                bonds.save_bond_data(BOND_JSON, {
+                    "isin": b_isin, "nominal": b_nominal, "price_load": b_load,
+                    "price_market": b_market, "coupon_pct": b_coupon, "frequency": b_freq,
+                    "accrued": b_accrued, "next_coupon": b_next, "maturity": b_mat,
+                    "currency": "EUR"})
+                st.success("BTP salvato.")
+
         try:
             bond = bonds.Bond(
                 isin=b_isin, nominal=float(b_nominal), price_load=float(b_load),
@@ -249,17 +283,11 @@ with st.sidebar:
         pr.fetch_history.cache_clear()
         pr.fetch_metadata.cache_clear()
         pr.fetch_dividends.cache_clear()
+        st.session_state.pop("saved_csv", None)  # re-read the saved holdings too
         st.rerun()
 
 # ---------- Load data --------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
-def load_tx(path_or_buf) -> pd.DataFrame:
-    return pf.load_transactions(path_or_buf)
-
-# Collect every uploaded file with its asset-class tag. If nothing is uploaded,
-# fall back to the bundled stocks CSV so behaviour matches the single-file app.
-ASSET_LABELS = {"stocks": "Stocks", "etf": "ETF", "crypto": "Crypto", "bond": "Bond"}
 # Identity hues for the per-class breakdown lines, stepped for the dark chart
 # surface (#0e1117) and checked with the dataviz all-pairs validator: every pair
 # clears the CVD and normal-vision separation floors. Only the three CSV classes
@@ -273,26 +301,20 @@ CLASS_COLORS = {"stocks": "#3987e5", "etf": "#199e70", "crypto": "#d95926"}
 # app's usual #e8edf5 (1.18:1 on white — invisible in the light theme).
 INK_NEUTRAL = "#6b7280"
 GRID_NEUTRAL = "rgba(128,128,128,0.25)"
-_sources: list[tuple[object, str]] = []
-if stocks_file is not None:
-    _sources.append((stocks_file, "stocks"))
-if etf_file is not None:
-    _sources.append((etf_file, "etf"))
-if crypto_file is not None:
-    _sources.append((crypto_file, "crypto"))
-if not _sources and DEFAULT_CSV.exists():
-    _sources.append((str(DEFAULT_CSV), "stocks"))
+_sources: list[tuple[bytes, str]] = [
+    (saved_csv[c], c) for c in storage.CLASSES if saved_csv.get(c) is not None]
 
 if not _sources and bond is None:
     st.markdown("# 📈 JBD Portfolio Monitor")
     st.info(
         "👋 **Welcome!** Upload a Yahoo Finance portfolio CSV from the sidebar to get started.\n\n"
         "Export from Yahoo Finance → your portfolio → ⋯ menu → **Export Transactions**, "
-        "then drag the file into one of the **Stocks / ETF / Crypto CSV** controls on the left."
+        "then drag the file into one of the **Stocks / ETF / Crypto CSV** controls on the left "
+        "— it is saved and reloaded automatically next time."
     )
     st.caption("Expected columns: Symbol · Trade Date · Purchase Price · Quantity · Transaction Type "
                "(+ optional Current Price). Common Yahoo column aliases are supported automatically.")
-    st.caption("…or just enable the **🏛️ Bond / BTP** section in the sidebar to track a bond alone.")
+    st.caption("…or press **🏛️ Carica BTP** in the sidebar to track the bond alone.")
     st.stop()
 
 # Tag each frame with its asset class and concatenate into one master ledger.
@@ -536,7 +558,8 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     sym_div = {s: divisor.get(ccy_map.get(s)) for s in all_syms}
     conv_syms = [s for s in all_syms if sym_div.get(s)]
     tx_eur = tx_sel[tx_sel["symbol"].isin(conv_syms)].copy()
-    tx_eur["price"] = tx_eur.apply(lambda r: r["price"] / sym_div[r["symbol"]], axis=1)
+    # map, not row-wise apply: apply on an empty frame returns a DataFrame and crashes.
+    tx_eur["price"] = tx_eur["price"] / tx_eur["symbol"].map(sym_div).astype(float)
     buy_eur = tx_eur[tx_eur["side"] == "BUY"]
     sell_eur = tx_eur[tx_eur["side"] == "SELL"]
     deployed_eur = float((buy_eur["qty"] * buy_eur["price"]).sum())
