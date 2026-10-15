@@ -115,6 +115,15 @@ def test_in_window_transactions_still_counted_once():
     assert (v - cf.cumsum()).iloc[-1] == pytest.approx(41_859.0)
 
 
+def test_trade_on_a_day_without_a_bar_lands_on_the_next_bar():
+    """A Saturday buy against a weekday-only index used to vanish entirely."""
+    hist = pd.DataFrame({"BTC-USD": [100.0, 110.0, 120.0]},
+                        index=pd.DatetimeIndex(["2026-01-09", "2026-01-12", "2026-01-13"]))
+    v, cf = mt.build_value_series(_tx([("BTC-USD", "2026-01-10", "BUY", 2.0, 105.0)]), hist)
+    assert cf.tolist() == pytest.approx([0.0, 210.0, 0.0])
+    assert v.tolist() == pytest.approx([0.0, 220.0, 240.0])
+
+
 def test_opening_cash_does_not_distort_twr():
     """TWR ignores element 0 of the cashflow series — it must stay unchanged."""
     tx = _tx([("BTC-USD", "2024-01-10", "BUY", 1.0, 100_000.0)])

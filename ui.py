@@ -147,6 +147,8 @@ hr { border-color: var(--line) !important; opacity: .7; }
   .kpi-value, .kpi-card.hero .kpi-value { font-size: 1.25rem; }
   .period-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .brand-title { font-size: 1.2rem; }
+  /* segmented controls (periods, classes) wrap instead of running off-screen */
+  [data-testid="stButtonGroup"] > div { flex-wrap: wrap; row-gap: 6px; }
 }
 </style>
 """
