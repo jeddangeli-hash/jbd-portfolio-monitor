@@ -18,6 +18,7 @@ PERIOD_LABELS = {"1G": "1G", "2G": "2G", "1S": "Settimana", "1M": "1M", "6M": "6
                  "YTD": "YTD", "1A": "1A", "Inizio": "Dall'inizio"}
 INTRADAY = {"1G", "2G"}
 LOCAL_TZ = "Europe/Rome"
+BENCHMARK = "^GSPC"  # S&P 500 index
 
 
 def daily_base(period: str, index: pd.DatetimeIndex) -> pd.Timestamp | None:
@@ -128,3 +129,21 @@ def sparkline(prices: pd.Series, base: pd.Timestamp | None, points: int = 60) ->
         step = len(p) / points
         p = p.iloc[[int(i * step) for i in range(points)] + [len(p) - 1]]
     return [round(float(x), 6) for x in p]
+
+
+def benchmark_curve(prices: pd.Series, base: pd.Timestamp | None) -> pd.Series:
+    """Price return of a benchmark from `base` (fraction, base point at 0).
+
+    The base is the portfolio's own base point; when the benchmark has no
+    print exactly there (weekend, other exchange's holiday) its last earlier
+    price is used, or its first price if it starts later.
+    """
+    p = prices.ffill().dropna()
+    if p.empty or base is None:
+        return pd.Series(dtype=float)
+    before = p[p.index <= base]
+    p0 = float(before.iloc[-1]) if len(before) else float(p.iloc[0])
+    if not p0:
+        return pd.Series(dtype=float)
+    after = p[p.index > base]
+    return pd.concat([pd.Series([0.0], index=[base]), after / p0 - 1.0])
