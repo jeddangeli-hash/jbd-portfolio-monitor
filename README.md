@@ -48,21 +48,24 @@ The suite (`test_portfolio.py`, `test_tax.py`) covers lifetime stats, FIFO reali
    - After ~1 min you get a URL like `https://<your-app>.streamlit.app`. Open on iPhone Safari → Share → **Add to Home Screen** for an app-like icon.
 
 3. **Cross-device CSV persistence (optional but recommended)**
-   Streamlit Cloud containers are ephemeral — file uploads don't persist between sessions. To make uploads from any device update the deployed app for everyone:
-   - Create a GitHub Personal Access Token at <https://github.com/settings/tokens> with the `repo` scope.
+   Streamlit Cloud containers are ephemeral, so without this the saved holdings are lost on restart.
+   - Create a **private** GitHub repo for the data (the app repo is public — don't store holdings there).
+   - Create a fine-grained Personal Access Token at <https://github.com/settings/tokens> with *Contents: read & write* on that repo.
    - In your Streamlit Cloud app: ⋯ → **Settings → Secrets**. Paste:
      ```toml
-     github_token  = "ghp_xxxxxxxxxxxx"
-     github_repo   = "your-username/jbd-portfolio-monitor"
-     github_path   = "data/portfolio.csv"
-     github_branch = "main"
+     github_token    = "github_pat_xxxxxxxxxxxx"
+     github_repo     = "your-username/jbd-portfolio-data"   # private
+     github_branch   = "main"
+     github_data_dir = "data"   # files land at data/stocks.csv, data/etf.csv, data/crypto.csv
      ```
-   - Reload. After any upload a **💾 Save this CSV to GitHub** button appears in the sidebar — clicking it commits the file. Next time any device opens the app, the new CSV is the default.
 
-## Updating the CSV
+## Updating the holdings
 
-- **PC**: replace `data/portfolio.csv` and `git push` — Streamlit Cloud auto-redeploys.
-- **PC or iPhone (browser)**: open the app → sidebar uploader → **💾 Save this CSV to GitHub**.
+The sidebar shows one saved file per class (Stocks / ETF / Crypto), loaded automatically on open.
+To update one: press **✖** next to it, upload the new Yahoo export, done — it replaces the saved
+file (in the data repo when configured, otherwise `data/<class>.csv`). **Annulla** keeps the old one.
+
+The BTP is not loaded by default: press **🏛️ Carica BTP** in the sidebar to add it.
 
 ## Architecture
 
@@ -71,8 +74,10 @@ The suite (`test_portfolio.py`, `test_tax.py`) covers lifetime stats, FIFO reali
 - `metrics.py` — TWR curve, drawdown, volatility, Sharpe, daily returns.
 - `tax.py` — Italian capital-gain tax simulator (26% rate, loss carryforward).
 - `prices.py` — yfinance adapter: live quotes, history, metadata, dividends.
-- `test_portfolio.py` / `test_tax.py` — pytest suite for lifetime stats and tax logic.
-- `data/portfolio.csv` — current Yahoo Finance transactions export.
+- `storage.py` — load/save of the per-class holdings CSVs (GitHub contents API or local `data/`).
+- `bonds.py` — BTP valuation and JSON persistence.
+- `test_*.py` — pytest suite.
+- `data/<class>.csv` — saved Yahoo Finance exports (gitignored).
 
 ## Notes
 
