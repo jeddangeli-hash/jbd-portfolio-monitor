@@ -172,6 +172,31 @@ def fetch_history_bulk(symbols: list[str], period: str = "6mo") -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def fetch_intraday_bulk(symbols: list[str], period: str = "5d",
+                        interval: str = "15m") -> pd.DataFrame:
+    """Intraday closes, one column per symbol, on a shared UTC index.
+
+    ignore_tz=False keeps each exchange's timestamps tz-aware so US, EU and
+    crypto bars line up once converted to UTC (the default would strip the
+    zones and misalign them by hours).
+    """
+    if not HAS_YF or not symbols:
+        return pd.DataFrame()
+    try:
+        data = yf.download(tickers=" ".join(symbols), period=period, interval=interval,
+                           auto_adjust=True, group_by="ticker", progress=False,
+                           threads=True, ignore_tz=False)
+    except Exception:
+        return pd.DataFrame()
+    closes = _closes_from_download(data, list(symbols))
+    if not closes:
+        return pd.DataFrame()
+    frame = pd.DataFrame(closes).sort_index()
+    idx = pd.DatetimeIndex(frame.index)
+    frame.index = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
+    return frame
+
+
 @lru_cache(maxsize=128)
 def fetch_dividends(symbol: str) -> pd.Series:
     """Returns Series of per-share dividend amounts, indexed by ex-date."""

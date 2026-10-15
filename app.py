@@ -18,6 +18,7 @@ import metrics as mt
 import tax
 import bonds
 import storage
+import trend
 import ui
 
 # ---------- Page config ------------------------------------------------------
@@ -426,6 +427,236 @@ def _bond_position_row(bond) -> dict:
     }
 
 
+@st.cache_data(ttl=300, show_spinner="Prezzi intraday…")
+def get_intraday(symbols: tuple[str, ...]) -> pd.DataFrame:
+    return pr.fetch_intraday_bulk(list(symbols))
+
+
+def _eur_prices(frame: pd.DataFrame, syms, sym_div: dict) -> pd.DataFrame:
+    cols = [s for s in syms if s in frame.columns and sym_div.get(s)]
+    return pd.DataFrame({s: frame[s] / sym_div[s] for s in cols}, index=frame.index)
+
+
+def _daily_series(tx_c: pd.DataFrame, hist_eur: pd.DataFrame, live_mv: float):
+    """(values, cashflows) for one set of transactions, pinned to the live value."""
+    cols = [s for s in hist_eur.columns if s in set(tx_c["symbol"])]
+    if tx_c.empty or not cols:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+    v, cf = mt.build_value_series(tx_c, hist_eur[cols])
+    if v.empty or not (v > 0).any():
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+    v, cf = mt.trim_to_first_holding(v, cf)
+    if live_mv > 0:
+        v = v.copy()
+        v.iloc[-1] = live_mv
+    return v, cf
+
+
+def _period_pnl(values: pd.Series, cashflows: pd.Series, base) -> float:
+    pnl = values - cashflows.cumsum()
+    return float(pnl.iloc[-1] - (pnl.loc[base] if base is not None and base in pnl.index else 0.0))
+
+
+def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
+                 quotes_g: dict, sym_div: dict, conv_syms: list, csv_classes: list) -> None:
+    """Home 'Andamento': period simple return, per-class split and per-symbol table."""
+    st.subheader("Andamento")
+    f1, f2 = st.columns([3, 2])
+    with f1:
+        period = st.segmented_control(
+            "Periodo", trend.PERIODS, default="1G", key="trend_period",
+            format_func=lambda p: trend.PERIOD_LABELS[p], label_visibility="collapsed",
+        ) or "1G"
+    with f2:
+        # Key carries the options so a change in the page-level filter can't leave
+        # a stale selection behind.
+        picked = st.pills(
+            "Asset class", csv_classes, default=csv_classes, selection_mode="multi",
+            format_func=lambda c: ASSET_LABELS[c], label_visibility="collapsed",
+            key="trend_cls_" + "_".join(csv_classes),
+        )
+    if not picked:
+        st.info("Seleziona almeno una asset class.")
+        return
+    picked = [c for c in csv_classes if c in picked]
+
+    tx_f = tx_eur[tx_eur["asset_class"].isin(picked)]
+    pos_f = oc[oc["asset_class"].isin(picked) & (oc["asset_class"] != "bond")]
+    hist_all = get_history(tuple(conv_syms), "2y") if pr.HAS_YF else pd.DataFrame()
+    if tx_f.empty or hist_all.empty:
+        st.info("Servono i prezzi storici (Fetch live prices attivo) per l'andamento.")
+        return
+    hist_eur = _eur_prices(hist_all, sorted(set(tx_f["symbol"])), sym_div)
+    mv_cls = pos_f.groupby("asset_class")["market_value_eur"].sum()
+
+    # ---- curves: total + one per class ------------------------------------
+    curves: dict[str, pd.Series] = {}
+    pnl_by: dict[str, float] = {}
+    base_ts = None
+    sym_prices: pd.DataFrame = hist_eur          # per-symbol price source for the table
+    intraday = period in trend.INTRADAY
+    if intraday:
+        open_syms = tuple(sorted(pos_f["symbol"].unique()))
+        bars = _eur_prices(get_intraday(open_syms), open_syms, sym_div) if open_syms else pd.DataFrame()
+        if not bars.empty:
+            sessions = sorted(pos_f.loc[pos_f["asset_class"] != "crypto", "symbol"].unique())
+            start = trend.intraday_window(bars, period, sessions)
+            qty_all = pos_f.groupby("symbol")["qty"].sum()
+            total, base_ts = trend.intraday_curve(bars, qty_all, start)
+            if not total.empty:
+                curves["total"] = total
+                v_all = (bars[[c for c in bars.columns if c in qty_all.index]].ffill()
+                         * qty_all).sum(axis=1, min_count=1).dropna()
+                pnl_by["total"] = float(v_all.iloc[-1] - v_all[v_all.index <= base_ts].iloc[-1])
+                for cls in picked:
+                    q = pos_f[pos_f["asset_class"] == cls].groupby("symbol")["qty"].sum()
+                    c_curve, c_base = trend.intraday_curve(bars, q, start)
+                    if not c_curve.empty:
+                        curves[cls] = c_curve
+                        v_c = (bars[[c for c in bars.columns if c in q.index]].ffill()
+                               * q).sum(axis=1, min_count=1).dropna()
+                        pnl_by[cls] = float(v_c.iloc[-1] - v_c[v_c.index <= c_base].iloc[-1])
+                sym_prices = bars
+        if "total" not in curves:
+            intraday = False
+            st.caption("Prezzi intraday non disponibili: uso le chiusure giornaliere.")
+    if not intraday:
+        values, cfs = _daily_series(tx_f, hist_eur, float(mv_cls.sum()))
+        if values.empty:
+            st.info("Nessuno storico per le classi selezionate.")
+            return
+        base_ts = trend.daily_base(period, values.index)
+        curves["total"] = trend.period_curve(values, cfs, base_ts)
+        pnl_by["total"] = _period_pnl(values, cfs, base_ts)
+        for cls in picked:
+            v_c, cf_c = _daily_series(tx_f[tx_f["asset_class"] == cls], hist_eur,
+                                      float(mv_cls.get(cls, 0.0)))
+            if v_c.empty:
+                continue
+            b_c = base_ts if base_ts is not None and base_ts in v_c.index else None
+            curves[cls] = trend.period_curve(v_c, cf_c, b_c)
+            pnl_by[cls] = _period_pnl(v_c, cf_c, b_c)
+        # Today's live price as the last point of each symbol's daily series.
+        sym_prices = hist_eur.copy()
+        today_ts = pd.Timestamp(date.today())
+        for s in sym_prices.columns:
+            q = quotes_g.get(s)
+            if q and sym_div.get(s):
+                sym_prices.loc[today_ts, s] = q["price"] / sym_div[s]
+        sym_prices = sym_prices.sort_index()
+
+    total = curves["total"]
+    ret = float(total.iloc[-1]) if len(total) else 0.0
+    pnl = pnl_by.get("total", 0.0)
+    ui.kpi_grid([
+        ui.kpi(f"Rendimento · {trend.PERIOD_LABELS[period]}", ui.pct(ret * 100),
+               "simple return", positive=ret >= 0, hero=True),
+        ui.kpi("P&L nel periodo", ui.money(pnl), "in EUR", positive=pnl >= 0),
+        ui.kpi("Valore attuale", ui.money(float(mv_cls.sum())),
+               f"{pos_f['symbol'].nunique()} titoli"),
+    ] + ([ui.kpi(ASSET_LABELS[c], ui.pct(float(curves[c].iloc[-1]) * 100),
+                 ui.money(pnl_by.get(c, 0.0)) + " nel periodo",
+                 positive=float(curves[c].iloc[-1]) >= 0)
+          for c in picked if c in curves and len(curves[c])] if len(picked) > 1 else []))
+
+    # ---- chart ------------------------------------------------------------
+    def _x(s: pd.Series):
+        idx = s.index
+        if intraday and getattr(idx, "tz", None) is not None:
+            idx = idx.tz_convert(trend.LOCAL_TZ).tz_localize(None)
+        return idx
+
+    fig = go.Figure()
+    up = ret >= 0
+    line_c = ui.POS if up else ui.NEG
+    multi = len(picked) > 1
+    if multi:
+        for cls in picked:
+            if cls in curves and len(curves[cls]):
+                fig.add_trace(go.Scatter(
+                    x=_x(curves[cls]), y=curves[cls].values * 100, mode="lines",
+                    line=dict(color=CLASS_COLORS[cls], width=1.8), name=ASSET_LABELS[cls],
+                    hovertemplate="%{y:+.2f}%<extra>" + ASSET_LABELS[cls] + "</extra>"))
+    fig.add_trace(go.Scatter(
+        x=_x(total), y=total.values * 100, mode="lines",
+        line=dict(color=line_c if not multi else "#e6ebf2", width=2.6, shape="spline", smoothing=0.4),
+        fill="tozeroy", fillcolor="rgba(34,197,94,0.10)" if up else "rgba(244,63,94,0.10)",
+        name="Totale", hovertemplate="%{y:+.2f}%<extra>Totale</extra>"))
+    fig.add_hline(y=0, line_dash="dot", line_color="#4b5563")
+    fig.update_layout(
+        height=360, margin=dict(t=10, b=10, l=10, r=10), hovermode="x unified",
+        yaxis=dict(ticksuffix="%", gridcolor=GRID_NEUTRAL, zeroline=False),
+        xaxis=dict(showgrid=False, tickformat="%H:%M" if period == "1G" and intraday else None),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02), showlegend=multi,
+        transition=dict(duration=400, easing="cubic-in-out"))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ---- per-symbol breakdown --------------------------------------------
+    gross = (tx_eur[tx_eur["side"] == "BUY"].assign(_c=lambda d: d["qty"] * d["price"])
+             .groupby(["symbol", "asset_class"])["_c"].sum())
+    rows = []
+    for r in pos_f.itertuples():
+        s, cls = r.symbol, r.asset_class
+        q = quotes_g.get(s) or {}
+        day = (q["price"] / q["prev_close"] - 1) * 100 if q.get("prev_close") else None
+        tot_pnl = float((r.unrealized_pnl_eur or 0) + (r.realized_pnl_eur or 0))
+        cost = gross.get((s, cls))
+        simple = tot_pnl / cost * 100 if cost else None
+        prices_s = sym_prices[s] if s in sym_prices.columns else pd.Series(dtype=float)
+        if period == "Inizio" and not intraday:
+            per = simple
+            spark_base = prices_s.dropna().index.min() if len(prices_s.dropna()) else None
+            first = tx_f[(tx_f["symbol"] == s)]["trade_date"].min()
+            spark_base = pd.Timestamp(first) if pd.notna(first) else spark_base
+        else:
+            pr_ = trend.symbol_period_return(prices_s, base_ts)
+            per = pr_ * 100 if pr_ is not None else None
+            spark_base = base_ts
+        rsi = mt.compute_rsi(hist_all[s], 14) if s in hist_all.columns else None
+        rows.append({
+            "Titolo": s, "Classe": ASSET_LABELS[cls],
+            "Andamento": trend.sparkline(prices_s, spark_base),
+            "Giorno %": day, "Periodo %": per, "Simple return %": simple,
+            "P&L totale €": tot_pnl, "Valore €": float(r.market_value_eur), "RSI": rsi,
+        })
+    if not rows:
+        return
+    table = pd.DataFrame(rows).sort_values("Valore €", ascending=False)
+
+    def _tone(v):
+        if v is None or pd.isna(v):
+            return ""
+        return f"color: {ui.POS}" if v >= 0 else f"color: {ui.NEG}"
+
+    def _rsi_tone(v):
+        if v is None or pd.isna(v):
+            return ""
+        return f"color: {ui.NEG}" if v >= 70 else f"color: {ui.POS}" if v <= 30 else ""
+
+    styled = (table.style
+              .map(_tone, subset=["Giorno %", "Periodo %", "Simple return %", "P&L totale €"])
+              .map(_rsi_tone, subset=["RSI"])
+              .format({"Giorno %": "{:+.2f}%", "Periodo %": "{:+.2f}%",
+                       "Simple return %": "{:+.2f}%", "P&L totale €": ui.money,
+                       "Valore €": ui.money, "RSI": "{:.0f}"}, na_rep="—"))
+    st.markdown(f"**Titoli · {trend.PERIOD_LABELS[period]}**")
+    st.dataframe(
+        styled, hide_index=True, use_container_width=True,
+        height=min(38 + 35 * len(table), 520),
+        column_config={
+            "Andamento": st.column_config.LineChartColumn(
+                "Andamento", width="small", help="Prezzo nel periodo selezionato"),
+            "Giorno %": st.column_config.Column(help="Prezzo attuale vs chiusura precedente"),
+            "Periodo %": st.column_config.Column(
+                help="Variazione di prezzo nel periodo (Dall'inizio = simple return della posizione)"),
+            "Simple return %": st.column_config.Column(
+                help="P&L totale (realizzato + non realizzato) ÷ costo di tutti gli acquisti"),
+            "RSI": st.column_config.Column(help="RSI 14 giorni: >70 ipercomprato, <30 ipervenduto"),
+        },
+    )
+    st.caption("Importi in EUR al cambio di oggi. Il BTP non ha storico prezzi ed è escluso.")
+
+
 def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     """Cross-asset aggregate view ('Generale').
 
@@ -589,6 +820,10 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
                         if c != "EUR" and c in divisor)
     if fx_txt:
         st.caption(f"💶 FX today: {fx_txt}")
+
+    st.divider()
+
+    render_trend(tx_eur, oc, all_pos, quotes_g, sym_div, conv_syms, csv_classes)
 
     st.divider()
 

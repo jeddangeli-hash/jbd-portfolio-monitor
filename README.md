@@ -6,6 +6,7 @@ per-holding charts with buy/sell markers; daily, weekly, and dividend logs.
 
 ## Features
 
+- **Andamento (Home)** — simple-return chart for 1G / 2G (15-minute bars) and Settimana / 1M / 6M / YTD / 1A / Dall'inizio (daily, cash-flow aware), filterable by Stocks / ETF / Crypto, with per-class split and a per-symbol table (day %, period %, total simple return, total P&L, value, RSI 14, sparkline).
 - **TROIC (Total Return on Invested Capital)** — aggregate card in the Recap tab plus per-symbol `Total Cost`, `Total Value`, and `TROIC %` columns in Positions. Measures the multiplier on *all* capital ever deployed (including closed positions), not just net cash currently at risk.
 - **Lifetime cost/value tracking** per symbol — a single source of truth shared by the Positions and Holdings tabs.
 - **Post-tax simulator (Italian regime)** — 26% capital-gain rate on realized P&L with unlimited-life loss carryforward, a year-by-year table, and a dual pre-tax vs post-tax equity curve (tax applied as a step at each 31 Dec).
@@ -94,6 +95,7 @@ and animations in `ui.py`.
 - `metrics.py` — TWR curve, drawdown, volatility, Sharpe, daily returns.
 - `tax.py` — Italian capital-gain tax simulator (26% rate, loss carryforward).
 - `prices.py` — yfinance adapter: live quotes, history, metadata, dividends.
+- `trend.py` — period windows and simple-return curves behind the Andamento section.
 - `ui.py` — global CSS, KPI cards, brand header.
 - `storage.py` — load/save of the per-class holdings CSVs (GitHub contents API or local `data/`).
 - `bonds.py` — BTP valuation and JSON persistence.

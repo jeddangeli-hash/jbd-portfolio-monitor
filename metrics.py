@@ -52,11 +52,17 @@ def build_value_series(tx: pd.DataFrame, hist: pd.DataFrame) -> tuple[pd.Series,
                     opening_cash += r["qty"] * r["price"] * (1.0 if r["side"] == "BUY" else -1.0)
                     qty[r["symbol"]] += r["signed_qty"]
 
+    # A trade dated on a day with no bar (weekend crypto buy against a weekday
+    # index, exchange holiday) lands on the next bar instead of being dropped.
+    pending = sorted(d for d in tx_by_date if d >= hist_start)
     values, cashflows = [], []
     for ts in hist.index:
         d = ts.date() if hasattr(ts, "date") else ts
         cf = 0.0
-        for r in tx_by_date.get(d, []):
+        due = []
+        while pending and pending[0] <= d:
+            due.extend(tx_by_date[pending.pop(0)])
+        for r in due:
             if r["symbol"] in qty:
                 if r["side"] == "BUY":
                     cf += r["qty"] * r["price"]
