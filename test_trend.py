@@ -70,3 +70,13 @@ def test_symbol_period_return_and_sparkline():
     assert trend.symbol_period_return(p, None) is None
     sl = trend.sparkline(p, idx[49], points=10)
     assert sl[0] == 50.0 and sl[-1] == 100.0 and len(sl) <= 11
+
+
+def test_benchmark_curve_uses_last_price_on_or_before_base():
+    idx = pd.DatetimeIndex(["2026-10-09", "2026-10-12", "2026-10-13"])   # Fri, Mon, Tue
+    spx = pd.Series([100.0, 102.0, 99.0], index=idx)
+    base = pd.Timestamp("2026-10-11")                                     # Sunday
+    c = trend.benchmark_curve(spx, base)
+    assert c.index[0] == base and c.iloc[0] == 0.0
+    assert c.tolist()[1:] == pytest.approx([0.02, -0.01])
+    assert trend.benchmark_curve(spx, None).empty

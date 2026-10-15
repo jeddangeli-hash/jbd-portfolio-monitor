@@ -265,6 +265,10 @@ with st.sidebar:
 # no fourth hue in this lightness band clears the all-pairs floor. Green and red
 # stay reserved for win/loss polarity and are never identity colours.
 CLASS_COLORS = {"stocks": "#3987e5", "etf": "#199e70", "crypto": "#d95926"}
+# Benchmark line: fuchsia, far in hue from the class blues/teal/orange and from
+# the green/red/white portfolio line; it is also dashed, so it never relies on
+# colour alone.
+BENCH_COLOR = "#e879f9"
 # Streamlit picks light or dark from the viewer's browser and st.context.theme is
 # documented as unreliable on first load, so this chart's non-data ink has to read
 # on both surfaces. Both clear 3:1 against #ffffff and against #0e1117, unlike the
@@ -495,9 +499,12 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
     base_ts = None
     sym_prices: pd.DataFrame = hist_eur          # per-symbol price source for the table
     intraday = period in trend.INTRADAY
+    bench_px = pd.Series(dtype=float)
     if intraday:
         open_syms = tuple(sorted(pos_f["symbol"].unique()))
-        bars = _eur_prices(get_intraday(open_syms), open_syms, sym_div) if open_syms else pd.DataFrame()
+        raw = get_intraday(open_syms + (trend.BENCHMARK,)) if open_syms else pd.DataFrame()
+        bars = _eur_prices(raw, open_syms, sym_div) if not raw.empty else pd.DataFrame()
+        bench_px = raw[trend.BENCHMARK] if trend.BENCHMARK in raw.columns else pd.Series(dtype=float)
         if not bars.empty:
             sessions = sorted(pos_f.loc[pos_f["asset_class"] != "crypto", "symbol"].unique())
             start = trend.intraday_window(bars, period, sessions)
@@ -527,6 +534,7 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
             return
         base_ts = trend.daily_base(period, values.index)
         curves["total"] = trend.period_curve(values, cfs, base_ts)
+        bench_px = get_benchmark(trend.BENCHMARK, "2y") if pr.HAS_YF else pd.Series(dtype=float)
         pnl_by["total"] = _period_pnl(values, cfs, base_ts)
         for cls in picked:
             v_c, cf_c = _daily_series(tx_f[tx_f["asset_class"] == cls], hist_eur,
@@ -548,13 +556,20 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
     total = curves["total"]
     ret = float(total.iloc[-1]) if len(total) else 0.0
     pnl = pnl_by.get("total", 0.0)
+    # S&P 500 from the same base point (inception: the portfolio's first day).
+    bench = trend.benchmark_curve(bench_px, base_ts if base_ts is not None
+                                  else (total.index[0] if len(total) else None))
+    bench_ret = float(bench.iloc[-1]) if len(bench) else None
     ui.kpi_grid([
         ui.kpi(f"Rendimento · {trend.PERIOD_LABELS[period]}", ui.pct(ret * 100),
                "simple return", positive=ret >= 0, hero=True),
         ui.kpi("P&L nel periodo", ui.money(pnl), "in EUR", positive=pnl >= 0),
         ui.kpi("Valore attuale", ui.money(float(mv_cls.sum())),
                f"{pos_f['symbol'].nunique()} titoli"),
-    ] + ([ui.kpi(ASSET_LABELS[c], ui.pct(float(curves[c].iloc[-1]) * 100),
+    ] + ([ui.kpi("S&P 500", ui.pct(bench_ret * 100),
+                 f"portafoglio {'+' if ret >= bench_ret else '−'}"
+                 f"{abs(ret - bench_ret) * 100:.2f} pt vs indice",
+                 positive=ret >= bench_ret)] if bench_ret is not None else []) + ([ui.kpi(ASSET_LABELS[c], ui.pct(float(curves[c].iloc[-1]) * 100),
                  ui.money(pnl_by.get(c, 0.0)) + " nel periodo",
                  positive=float(curves[c].iloc[-1]) >= 0)
           for c in picked if c in curves and len(curves[c])] if len(picked) > 1 else []))
@@ -582,12 +597,18 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
         line=dict(color=line_c if not multi else "#e6ebf2", width=2.6, shape="spline", smoothing=0.4),
         fill="tozeroy", fillcolor="rgba(34,197,94,0.10)" if up else "rgba(244,63,94,0.10)",
         name="Totale", hovertemplate="%{y:+.2f}%<extra>Totale</extra>"))
+    if len(bench):
+        fig.add_trace(go.Scatter(
+            x=_x(bench), y=bench.values * 100, mode="lines",
+            line=dict(color=BENCH_COLOR, width=2, dash="dash"), name="S&P 500",
+            hovertemplate="%{y:+.2f}%<extra>S&P 500</extra>"))
     fig.add_hline(y=0, line_dash="dot", line_color="#4b5563")
     fig.update_layout(
         height=360, margin=dict(t=10, b=10, l=10, r=10), hovermode="x unified",
         yaxis=dict(ticksuffix="%", gridcolor=GRID_NEUTRAL, zeroline=False),
         xaxis=dict(showgrid=False, tickformat="%H:%M" if period == "1G" and intraday else None),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02), showlegend=multi,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        showlegend=multi or bool(len(bench)),
         transition=dict(duration=400, easing="cubic-in-out"))
     st.plotly_chart(fig, use_container_width=True)
 
