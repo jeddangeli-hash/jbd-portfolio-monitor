@@ -158,7 +158,9 @@ def _holdings_slot(cls: str) -> None:
         c1, c2 = st.columns([5, 1])
         c1.markdown(f"📄 **{label}**  \n<small>{_holdings_summary(content)}</small>",
                     unsafe_allow_html=True)
-        if c2.button("✖", key=f"x_{cls}", help=f"Sostituisci il file {label} con uno nuovo"):
+        # Icon, not a "✖" glyph: the narrow column clips text labels.
+        if c2.button("", icon=":material/close:", key=f"x_{cls}",
+                     help=f"Sostituisci il file {label} con uno nuovo"):
             st.session_state[replace_key] = True
             st.rerun()
         return
