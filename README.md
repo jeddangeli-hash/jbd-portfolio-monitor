@@ -67,6 +67,16 @@ file (in the data repo when configured, otherwise `data/<class>.csv`). **Annulla
 
 The BTP is not loaded by default: press **🏛️ Carica BTP** in the sidebar to add it.
 
+## Use it as an app (phone + PC)
+
+- **iPhone (Safari)**: open the app URL → Share → **Add to Home Screen**.
+- **Android (Chrome)**: open the app URL → ⋮ → **Add to Home screen** / **Install app**.
+- **PC (Chrome or Edge)**: open the app URL → ⋮ → **Cast, save and share → Install page as app**
+  (Edge: ⋯ → **Apps → Install this site as an app**). It opens in its own window with the app icon.
+
+The look (dark theme, Inter font, chart palette) lives in `.streamlit/config.toml`; cards, header
+and animations in `ui.py`.
+
 ## Architecture
 
 - `app.py` — Streamlit UI, all tabs.
@@ -74,6 +84,7 @@ The BTP is not loaded by default: press **🏛️ Carica BTP** in the sidebar to
 - `metrics.py` — TWR curve, drawdown, volatility, Sharpe, daily returns.
 - `tax.py` — Italian capital-gain tax simulator (26% rate, loss carryforward).
 - `prices.py` — yfinance adapter: live quotes, history, metadata, dividends.
+- `ui.py` — global CSS, KPI cards, brand header.
 - `storage.py` — load/save of the per-class holdings CSVs (GitHub contents API or local `data/`).
 - `bonds.py` — BTP valuation and JSON persistence.
 - `test_*.py` — pytest suite.
