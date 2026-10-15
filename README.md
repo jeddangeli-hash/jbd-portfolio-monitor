@@ -77,6 +77,16 @@ The BTP is not loaded by default: press **🏛️ Carica BTP** in the sidebar to
 The look (dark theme, Inter font, chart palette) lives in `.streamlit/config.toml`; cards, header
 and animations in `ui.py`.
 
+## Speed
+
+- Only the open tab runs (lazy `st.tabs`), so a click no longer recomputes all 13 tabs.
+- Live quotes come from one batched Yahoo download; symbols whose currency can't be told from the
+  ticker, and sector metadata, are fetched in parallel.
+- **Keep the app awake**: Community Cloud puts idle apps to sleep, and waking one takes ~1 minute.
+  The `Keep app awake` GitHub Action visits the app every 6 hours. Turn it on once: repo
+  **Settings → Secrets and variables → Actions → Variables → New repository variable**,
+  name `APP_URL`, value `https://<your-app>.streamlit.app`.
+
 ## Architecture
 
 - `app.py` — Streamlit UI, all tabs.
