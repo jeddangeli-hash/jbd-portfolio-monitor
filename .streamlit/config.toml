@@ -1,0 +1,32 @@
+# Visual theme. Forced dark so the custom cards, charts and CSS in theme.py
+# render against one known surface instead of whatever the browser prefers.
+
+[theme]
+base = "dark"
+primaryColor = "#7c8eff"
+backgroundColor = "#0a0d14"
+secondaryBackgroundColor = "#131824"
+textColor = "#e6e9f0"
+borderColor = "#222838"
+showWidgetBorder = true
+baseRadius = "0.75rem"
+buttonRadius = "full"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "'Plus Jakarta Sans':https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 15
+metricValueFontSize = "1.65rem"
+metricValueFontWeight = 700
+headingFontWeights = [800, 700, 650, 600, 600, 600]
+greenColor = "#3ddc97"
+redColor = "#ff6b81"
+blueColor = "#7c8eff"
+dataframeBorderColor = "#1c2230"
+dataframeHeaderBackgroundColor = "#111621"
+showSidebarBorder = true
+chartCategoricalColors = ["#7c8eff", "#3ddc97", "#f4b942", "#4cc9f0", "#c084fc", "#ff9f6b", "#ff6b81", "#9aa4b8"]
+
+[theme.sidebar]
+backgroundColor = "#0d111a"
+secondaryBackgroundColor = "#151b28"
+borderColor = "#1e2433"

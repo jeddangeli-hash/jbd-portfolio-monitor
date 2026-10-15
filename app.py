@@ -18,47 +18,18 @@ import prices as pr
 import metrics as mt
 import tax
 import bonds
+import theme as ui
 
 # ---------- Page config ------------------------------------------------------
 
 st.set_page_config(
     page_title="JBD Portfolio Monitor",
-    page_icon="📈",
+    page_icon=":material/monitoring:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-CSS = """
-<style>
-.block-container { padding-top: 1.5rem; padding-bottom: 2rem; max-width: 1500px; }
-[data-testid="stMetricValue"] { font-size: 1.6rem; font-weight: 600; }
-[data-testid="stMetricLabel"] { font-size: 0.82rem; color: #7a8290; }
-[data-testid="stMetricDelta"] { font-size: 0.92rem; }
-.kpi-card {
-    background: linear-gradient(135deg, #1a1d29 0%, #232838 100%);
-    border: 1px solid #2c3142;
-    border-radius: 14px;
-    padding: 16px 20px;
-    margin-bottom: 8px;
-}
-.kpi-label { color: #8a93a3; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
-.kpi-value { color: #f1f3f6; font-size: 1.7rem; font-weight: 600; line-height: 1.1; }
-.kpi-sub { font-size: 0.85rem; margin-top: 4px; }
-.kpi-pos { color: #3ddc97; }
-.kpi-neg { color: #ff6b81; }
-.period-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin: 8px 0 18px; }
-.period-cell {
-    background: #181b25; border: 1px solid #262a38; border-radius: 10px;
-    padding: 12px 14px; text-align: center;
-}
-.period-label { color: #7a8290; font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; }
-.period-value { font-size: 1.25rem; font-weight: 600; margin-top: 4px; }
-h1, h2, h3 { font-weight: 600; letter-spacing: -0.01em; }
-.stTabs [data-baseweb="tab-list"] { gap: 4px; }
-.stTabs [data-baseweb="tab"] { padding: 10px 18px; }
-</style>
-"""
-st.markdown(CSS, unsafe_allow_html=True)
+ui.inject_css()
 
 # ---------- Auth gate --------------------------------------------------------
 
@@ -101,10 +72,13 @@ def _check_password() -> bool:
         else:
             st.session_state["auth_ok"] = False
 
-    st.markdown("## 🔒 JBD Portfolio Monitor")
-    st.text_input("Password", type="password", key="auth_pw", on_change=_submit)
-    if st.session_state.get("auth_ok") is False:
-        st.error("Wrong password.")
+    ui.login_header()
+    _, mid, _ = st.columns([1, 1.1, 1])
+    with mid:
+        st.text_input("Password", type="password", key="auth_pw", on_change=_submit,
+                      label_visibility="collapsed", placeholder="Password")
+        if st.session_state.get("auth_ok") is False:
+            st.error("Wrong password.")
     return False
 
 
@@ -117,9 +91,9 @@ if not _check_password():
 DEFAULT_CSV = Path(__file__).parent / "data" / "portfolio.csv"
 
 with st.sidebar:
-    st.markdown("### 📊 Portfolio Monitor")
-    st.caption("Yahoo CSV → live analytics")
+    ui.sidebar_brand()
     st.divider()
+    st.markdown("#### Data sources")
 
     # Three optional uploaders, one per asset class. Each takes the same Yahoo
     # CSV schema (ETF/crypto exports are identical to stocks), so the engine
@@ -144,7 +118,7 @@ with st.sidebar:
         except Exception:
             token = repo = path = branch = None
         if token and repo:
-            if st.button("💾 Save this CSV to GitHub", use_container_width=True,
+            if st.button("Save this CSV to GitHub", icon=":material/cloud_upload:", width="stretch",
                          help="Persists this upload so iPhone + PC + any browser see it on reload"):
                 content = uploaded.getvalue()
                 api = f"https://api.github.com/repos/{repo}/contents/{path}"
@@ -178,6 +152,7 @@ with st.sidebar:
         elif token is None and repo is None:
             st.caption("ℹ️ Set `github_token` + `github_repo` in Streamlit secrets "
                        "to enable cross-device save.")
+    st.markdown("#### Settings")
     use_live = st.toggle("Fetch live prices", value=True)
     benchmark = st.selectbox("Benchmark", ["SPY", "QQQ", "VTI", "ACWI", "URTH", "None"], index=0)
     period = st.selectbox("History period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
@@ -186,7 +161,7 @@ with st.sidebar:
     # ----- Bond / BTP (manual, JSON-persisted) -------------------------------
     BOND_JSON = Path(__file__).parent / "data" / "bond.json"
     st.divider()
-    st.markdown("#### 🏛️ Bond / BTP")
+    st.markdown("#### Bond / BTP")
     bond_included = st.checkbox("Includi BTP nel portafoglio", value=True, key="bond_incl")
     _bd = bonds.load_bond_data(BOND_JSON)
     inflation_assumed = st.slider("Inflazione assunta (% per YTM nominale)",
@@ -222,7 +197,7 @@ with st.sidebar:
                                value=date.fromisoformat(str(_bd["next_coupon"])), key="b_next")
         b_mat = st.date_input("Scadenza",
                               value=date.fromisoformat(str(_bd["maturity"])), key="b_mat")
-        if st.button("💾 Salva BTP", use_container_width=True):
+        if st.button("Salva BTP", icon=":material/save:", width="stretch"):
             bonds.save_bond_data(BOND_JSON, {
                 "isin": b_isin, "nominal": b_nominal, "price_load": b_load,
                 "price_market": b_market, "coupon_pct": b_coupon, "frequency": b_freq,
@@ -243,8 +218,8 @@ with st.sidebar:
             bond = None
 
     st.divider()
-    st.caption(f"Valuation date: **{date.today().isoformat()}**")
-    if st.button("🔄 Refresh prices", use_container_width=True):
+    st.caption(f"Valuation date · **{date.today().strftime('%d %b %Y')}**")
+    if st.button("Refresh prices", icon=":material/refresh:", width="stretch", type="primary"):
         st.cache_data.clear()
         pr.fetch_history.cache_clear()
         pr.fetch_metadata.cache_clear()
@@ -284,15 +259,16 @@ if not _sources and DEFAULT_CSV.exists():
     _sources.append((str(DEFAULT_CSV), "stocks"))
 
 if not _sources and bond is None:
-    st.markdown("# 📈 JBD Portfolio Monitor")
+    ui.hero("JBD", "Portfolio Monitor", "Upload a portfolio to get started",
+            live=False, stamp=date.today().strftime("%A, %d %B %Y"))
     st.info(
-        "👋 **Welcome!** Upload a Yahoo Finance portfolio CSV from the sidebar to get started.\n\n"
+        "**Welcome!** Upload a Yahoo Finance portfolio CSV from the sidebar to get started.\n\n"
         "Export from Yahoo Finance → your portfolio → ⋯ menu → **Export Transactions**, "
         "then drag the file into one of the **Stocks / ETF / Crypto CSV** controls on the left."
     )
     st.caption("Expected columns: Symbol · Trade Date · Purchase Price · Quantity · Transaction Type "
                "(+ optional Current Price). Common Yahoo column aliases are supported automatically.")
-    st.caption("…or just enable the **🏛️ Bond / BTP** section in the sidebar to track a bond alone.")
+    st.caption("…or just enable the **Bond / BTP** section in the sidebar to track a bond alone.")
     st.stop()
 
 # Tag each frame with its asset class and concatenate into one master ledger.
@@ -320,13 +296,16 @@ present_classes = [c for c in ("stocks", "etf", "crypto") if c in set(tx_all["as
 if bond is not None:
     present_classes = present_classes + ["bond"]
 
-st.markdown("# 📈 JBD Portfolio Monitor")
+ui.hero("JBD", "Portfolio Monitor",
+        "Performance, risk and allocation across "
+        + ", ".join(ASSET_LABELS[c] for c in present_classes),
+        live=use_live, stamp=datetime.now().strftime("%A, %d %B %Y · %H:%M"))
 if len(present_classes) > 1:
     options = ["Generale"] + present_classes
     selected_class = st.radio(
         "Asset class",
         options,
-        format_func=lambda c: "🌐 Generale" if c == "Generale" else ASSET_LABELS[c],
+        format_func=lambda c: ":material/public: Generale" if c == "Generale" else ASSET_LABELS[c],
         horizontal=True,
         label_visibility="collapsed",
     )
@@ -561,9 +540,9 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     # ---- header + warnings -------------------------------------------------
     ts_ = datetime.now().strftime("%Y-%m-%d %H:%M")
     label_list = ", ".join(ASSET_LABELS[c] for c in classes)
-    st.caption(f"As of {ts_} · aggregate of **{label_list}** · "
-               f"{int(open_mask.sum())} open positions · totals in **EUR** "
-               f"(today's FX applied to realized/historical too)")
+    ui.chips([("As of", ts_), ("Aggregate", label_list),
+              ("Open positions", str(int(open_mask.sum()))), ("Currency", "EUR")])
+    st.caption("Today's FX rate is applied to realized and historical figures too.")
 
     if not use_live:
         st.warning("Live prices are off — EUR conversion needs live quotes/FX. "
@@ -578,18 +557,27 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
 
     # ---- KPIs (EUR primary) ------------------------------------------------
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Market Value", f"€{total_mv_eur:,.0f}")
-    c2.metric("Total P&L", f"€{total_pnl_eur:,.0f}")
-    c3.metric("Unrealized P&L", f"€{total_unreal_eur:,.0f}")
-    c4.metric("Realized P&L", f"€{total_real_eur:,.0f}")
-    c5.metric("Simple return on net cash", f"{simple_on_net:+.2f}%",
-              help="Total EUR P&L ÷ net cash invested (deployed − returned). "
-                   "Matches the simple-return chart below.")
-    c6.metric("XIRR (MWR)", f"{agg_xirr*100:.2f}%" if agg_xirr else "n/a")
+    ICON = ui.ICONS
+    c1.markdown(ui.kpi("Market Value", ui.money(total_mv_eur, "€"), "EUR, live FX",
+                       icon=ICON["wallet"]), unsafe_allow_html=True)
+    c2.markdown(ui.kpi("Total P&L", ui.money(total_pnl_eur, "€"), "realized + unrealized",
+                       positive=total_pnl_eur >= 0, icon=ICON["sigma"]), unsafe_allow_html=True)
+    c3.markdown(ui.kpi("Unrealized P&L", ui.money(total_unreal_eur, "€"), "open positions",
+                       positive=total_unreal_eur >= 0, icon=ICON["trend"]), unsafe_allow_html=True)
+    c4.markdown(ui.kpi("Realized P&L", ui.money(total_real_eur, "€"), "closed lots",
+                       positive=total_real_eur >= 0, icon=ICON["check"]), unsafe_allow_html=True)
+    c5.markdown(ui.kpi("Return on net cash", f"{simple_on_net:+.2f}%", "simple",
+                       positive=simple_on_net >= 0, icon=ICON["percent"],
+                       tooltip="Total EUR P&L ÷ net cash invested (deployed − returned). "
+                               "Matches the simple-return chart below."),
+                unsafe_allow_html=True)
+    c6.markdown(ui.kpi("XIRR (MWR)", f"{agg_xirr*100:.2f}%" if agg_xirr else "n/a",
+                       "money-weighted, ann.", positive=(agg_xirr or 0) >= 0,
+                       icon=ICON["gauge"]), unsafe_allow_html=True)
     fx_txt = " · ".join(f"EUR{c}={divisor[c]:.4f}" for c in currencies
                         if c != "EUR" and c in divisor)
     if fx_txt:
-        st.caption(f"💶 FX today: {fx_txt}")
+        st.caption(f"FX today · {fx_txt}")
 
     st.divider()
 
@@ -604,7 +592,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
             fig = px.pie(alloc, names="label", values="market_value_eur", hole=0.55)
             fig.update_traces(textposition="inside", textinfo="percent+label")
             fig.update_layout(showlegend=True, margin=dict(t=10, b=10, l=10, r=10), height=300)
-            st.plotly_chart(fig, use_container_width=True)
+            ui.chart(fig, use_container_width=True)
         else:
             st.info("No convertible open positions to allocate.")
     with right:
@@ -825,9 +813,9 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
         fig.update_layout(height=440, margin=dict(t=10, b=10, l=10, r=10),
                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                           yaxis_title="% return", xaxis=dict(showgrid=False),
-                          yaxis=dict(gridcolor="#222", zerolinecolor="#444"),
+                          yaxis=dict(gridcolor=ui.GRID, zerolinecolor="#444"),
                           legend=dict(orientation="h", yanchor="bottom", y=1.02))
-        st.plotly_chart(fig, use_container_width=True)
+        ui.chart(fig, use_container_width=True)
 
         # Equity curve (€)
         st.subheader("Equity curve (€)")
@@ -851,9 +839,9 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
         fig2.update_layout(height=360, margin=dict(t=10, b=10, l=10, r=10),
                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                            yaxis_title="€", xaxis=dict(showgrid=False),
-                           yaxis=dict(gridcolor="#222"),
+                           yaxis=dict(gridcolor=ui.GRID),
                            legend=dict(orientation="h", yanchor="bottom", y=1.02))
-        st.plotly_chart(fig2, use_container_width=True)
+        ui.chart(fig2, use_container_width=True)
 
         # Total P&L over time (€) — aggregate plus one line per asset class.
         st.subheader("Total P&L over time (€)")
@@ -931,7 +919,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
             y=[total_pnl_curve.loc[peak_idx], total_pnl_curve.loc[trough_idx]],
             mode="markers+text",
             marker=dict(size=10, color=["#3ddc97", "#ff6b81"],
-                        line=dict(color="#0e1117", width=2)),
+                        line=dict(color=ui.CARD, width=2)),
             text=["" if peak_idx == total_pnl_curve.index[-1]
                   else f"Peak €{total_pnl_curve.loc[peak_idx]:,.0f}",
                   "" if trough_idx == total_pnl_curve.index[-1]
@@ -961,13 +949,13 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
                            yaxis=dict(gridcolor=GRID_NEUTRAL, zerolinecolor="#888"),
                            hovermode="x unified",
                            legend=dict(orientation="h", yanchor="bottom", y=1.02))
-        st.plotly_chart(fig3, use_container_width=True)
+        ui.chart(fig3, use_container_width=True)
 
         pk1, pk2, pk3, pk4 = st.columns(4)
-        pk1.metric("Current P&L", f"€{total_pnl_curve.iloc[-1]:,.0f}")
-        pk2.metric("Peak P&L", f"€{total_pnl_curve.loc[peak_idx]:,.0f}",
+        pk1.metric("Current P&L", ui.money(total_pnl_curve.iloc[-1], "€"))
+        pk2.metric("Peak P&L", ui.money(total_pnl_curve.loc[peak_idx], "€"),
                    help=f"on {peak_idx.date()}")
-        pk3.metric("Trough P&L", f"€{total_pnl_curve.loc[trough_idx]:,.0f}",
+        pk3.metric("Trough P&L", ui.money(total_pnl_curve.loc[trough_idx], "€"),
                    help=f"on {trough_idx.date()}")
         pk4.metric("Days winning",
                    f"{int((total_pnl_curve >= 0).sum())} / {len(total_pnl_curve)}")
@@ -1009,12 +997,12 @@ def render_bond_view(bond, inflation_pct: float) -> None:
     ytm_n = bond.ytm_nominal(inflation_pct)
 
     a1, a2, a3, a4 = st.columns(4)
-    a1.metric("Load value (clean)", f"€{bond.load_value:,.0f}",
+    a1.metric("Load value (clean)", ui.money(bond.load_value, "€"),
               help=f"nominal × {bond.price_load:.4f}/100")
-    a2.metric("Market value (clean)", f"€{bond.market_value:,.0f}",
+    a2.metric("Market value (clean)", ui.money(bond.market_value, "€"),
               help=f"nominal × {bond.price_market:.4f}/100")
-    a3.metric("P&L (capital)", f"€{bond.pnl:,.0f}", f"{bond.return_pct:+.2f}%")
-    a4.metric("Accrued (rateo)", f"€{bond.accrued:,.0f}",
+    a3.metric("P&L (capital)", ui.money(bond.pnl, "€"), f"{bond.return_pct:+.2f}%")
+    a4.metric("Accrued (rateo)", ui.money(bond.accrued, "€"),
               help="Shown separately — NOT in P&L or aggregate market value.")
 
     b1, b2, b3, b4 = st.columns(4)
@@ -1085,12 +1073,11 @@ port_xirr = pf.portfolio_xirr(tx, positions, today)
 
 ts = datetime.now().strftime("%Y-%m-%d %H:%M")
 src = "live (yfinance)" if use_live and quotes else "snapshot"
-st.caption(f"As of {ts} · prices: **{src}** · {len(positions)} open positions · benchmark: **{benchmark}**")
+ui.chips([("As of", ts), ("Prices", src), ("Open positions", str(len(positions))),
+          ("Benchmark", benchmark), ("Period", period)])
 
-def kpi(label: str, value: str, sub: str = "", positive: bool | None = None):
-    cls = "kpi-pos" if positive is True else "kpi-neg" if positive is False else ""
-    sub_html = f'<div class="kpi-sub {cls}">{sub}</div>' if sub else ""
-    return f'<div class="kpi-card"><div class="kpi-label">{label}</div><div class="kpi-value">{value}</div>{sub_html}</div>'
+kpi = ui.kpi
+ICON = ui.ICONS
 
 total_pnl_all = total_unrealized + total_realized
 
@@ -1112,22 +1099,24 @@ _son = f"{simple_on_net_o:+.2f}%" if simple_on_net_o is not None else "—"
 _rr = f"{realized_ret_o:+.2f}%" if realized_ret_o is not None else "—"
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.markdown(kpi("Market Value", f"${total_mv:,.0f}", f"{len(positions)} positions"), unsafe_allow_html=True)
-c2.markdown(kpi("Day Change", f"${day_change_total:,.0f}", f"{day_change_pct:+.2f}%",
-                positive=day_change_total >= 0), unsafe_allow_html=True)
-c3.markdown(kpi("Unrealized P&L", f"${total_unrealized:,.0f}",
+c1.markdown(kpi("Market Value", ui.money(total_mv), f"{len(positions)} positions",
+                icon=ICON["wallet"]), unsafe_allow_html=True)
+c2.markdown(kpi("Day Change", ui.money(day_change_total), f"{day_change_pct:+.2f}%",
+                positive=day_change_total >= 0, icon=ICON["pulse"]), unsafe_allow_html=True)
+c3.markdown(kpi("Unrealized P&L", ui.money(total_unrealized),
                 f"{(total_unrealized/total_invested*100 if total_invested else 0):+.2f}% on cost",
-                positive=total_unrealized >= 0), unsafe_allow_html=True)
-c4.markdown(kpi("Realized P&L", f"${total_realized:,.0f}",
+                positive=total_unrealized >= 0, icon=ICON["trend"]), unsafe_allow_html=True)
+c4.markdown(kpi("Realized P&L", ui.money(total_realized),
                 f"Realized {_rr}" if realized_ret_o is not None else "from closed lots",
-                positive=(realized_ret_o >= 0) if realized_ret_o is not None else None),
-            unsafe_allow_html=True)
-c5.markdown(kpi("Total P&L", f"${total_pnl_all:,.0f}",
+                positive=(realized_ret_o >= 0) if realized_ret_o is not None else None,
+                icon=ICON["check"]), unsafe_allow_html=True)
+c5.markdown(kpi("Total P&L", ui.money(total_pnl_all),
                 f"Simple/net cash {_son}",
-                positive=(simple_on_net_o >= 0) if simple_on_net_o is not None else None),
-            unsafe_allow_html=True)
+                positive=(simple_on_net_o >= 0) if simple_on_net_o is not None else None,
+                icon=ICON["sigma"]), unsafe_allow_html=True)
 c6.markdown(kpi("XIRR (MWR)", f"{port_xirr*100:.2f}%" if port_xirr else "n/a",
-                "money-weighted, ann.", positive=(port_xirr or 0) >= 0), unsafe_allow_html=True)
+                "money-weighted, ann.", positive=(port_xirr or 0) >= 0,
+                icon=ICON["gauge"]), unsafe_allow_html=True)
 
 st.markdown("")
 
@@ -1167,9 +1156,13 @@ if not hist.empty:
 
 (tab_overview, tab_recap, tab_posttax, tab_today, tab_pos, tab_perf, tab_daily,
  tab_holdings, tab_alloc, tab_risk, tab_div, tab_weekly, tab_lots) = st.tabs([
-    "🎯 Overview", "📑 Recap", "🧮 Post-tax", "📈 Today", "📋 Positions",
-    "📊 Performance", "📅 Daily", "🏷 Holdings", "🗂 Allocation", "⚠️ Risk",
-    "💰 Dividends", "📆 Weekly", "🧾 Lots"
+    ":material/dashboard: Overview", ":material/summarize: Recap",
+    ":material/calculate: Post-tax", ":material/today: Today",
+    ":material/list_alt: Positions", ":material/show_chart: Performance",
+    ":material/calendar_month: Daily", ":material/sell: Holdings",
+    ":material/donut_large: Allocation", ":material/shield: Risk",
+    ":material/payments: Dividends", ":material/date_range: Weekly",
+    ":material/receipt_long: Lots"
 ])
 
 # ---------- Overview ---------------------------------------------------------
@@ -1202,12 +1195,12 @@ with tab_overview:
         with col_pie:
             fig = px.pie(
                 agg_ind, values="market_value", names=group_col, hole=0.55,
-                color_discrete_sequence=px.colors.sequential.Tealgrn_r,
+                color_discrete_sequence=ui.PIE_SEQ,
                 custom_data=["holdings", "return_pct", "pct"],
             )
             fig.update_traces(
                 textposition="outside", textinfo="label+percent",
-                marker=dict(line=dict(color="#0e1117", width=2)),
+                marker=dict(line=dict(color=ui.CARD, width=2)),
                 hovertemplate=("<b>%{label}</b><br>$%{value:,.0f}"
                                "<br>%{customdata[0]} holdings"
                                "<br>Return %{customdata[1]:+.1f}%<extra></extra>"),
@@ -1215,7 +1208,7 @@ with tab_overview:
             fig.update_layout(showlegend=False, height=440,
                               margin=dict(t=20, b=10, l=10, r=10),
                               paper_bgcolor="rgba(0,0,0,0)")
-            event = st.plotly_chart(
+            event = ui.chart(
                 fig, use_container_width=True,
                 on_select="rerun",
                 key=f"industry_pie_{group_col}",
@@ -1318,7 +1311,7 @@ with tab_overview:
                 sub_ret = (sub_pnl / sub_inv * 100.0) if sub_inv > 0 else 0.0
                 dd1, dd2, dd3 = st.columns(3)
                 dd1.metric("Holdings", len(detail))
-                dd2.metric("Mkt value", f"${sub_mv:,.0f}")
+                dd2.metric("Mkt value", ui.money(sub_mv))
                 dd3.metric("Return %", f"{sub_ret:+.2f}%")
 
         st.markdown("---")
@@ -1339,12 +1332,18 @@ with tab_overview:
                 "pct": small["pct"].sum(),
             }])], ignore_index=True)
         fig = px.pie(big, values="market_value", names="symbol", hole=0.55,
-                     color_discrete_sequence=px.colors.sequential.Tealgrn_r)
-        fig.update_traces(textposition="outside", textinfo="label+percent",
-                          marker=dict(line=dict(color="#0e1117", width=2)))
+                     color_discrete_sequence=ui.PIE_SEQ)
+        # Inside labels that hide when a slice is too thin: 30+ outside labels
+        # squeezed the donut to a dot. Hover still shows every slice.
+        fig.update_traces(textposition="inside", textinfo="label+percent",
+                          insidetextorientation="horizontal",
+                          hovertemplate="<b>%{label}</b><br>$%{value:,.0f} · %{percent}<extra></extra>",
+                          marker=dict(line=dict(color=ui.CARD, width=2)))
         fig.update_layout(showlegend=False, height=420, margin=dict(t=10, b=10, l=10, r=10),
-                          paper_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True)
+                          paper_bgcolor="rgba(0,0,0,0)",
+                          uniformtext=dict(minsize=10, mode="hide"),
+                          annotations=[ui.donut_center(ui.money(total_mv), "market value")])
+        ui.chart(fig, use_container_width=True)
 
     with col_b:
         st.subheader("Top movers (today)")
@@ -1359,7 +1358,7 @@ with tab_overview:
                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                            xaxis_title="% change", yaxis=dict(autorange="reversed"),
                            xaxis=dict(zerolinecolor="#444"))
-        st.plotly_chart(fig2, use_container_width=True)
+        ui.chart(fig2, use_container_width=True)
 
     st.subheader("Performance attribution (top contributors to total P&L)")
     # Use all_positions so closed-position realized gains/losses show up too.
@@ -1375,7 +1374,7 @@ with tab_overview:
                        xaxis_title="Total P&L (realized + unrealized)",
                        yaxis=dict(autorange="reversed"),
                        xaxis=dict(zerolinecolor="#666"))
-    st.plotly_chart(fig3, use_container_width=True)
+    ui.chart(fig3, use_container_width=True)
 
 # ---------- Recap -----------------------------------------------------------
 
@@ -1399,35 +1398,35 @@ with tab_recap:
 
     st.subheader("Capital flow")
     r1, r2, r3, r4 = st.columns(4)
-    r1.metric("Total capital deployed", f"${total_deployed:,.0f}",
+    r1.metric("Total capital deployed", ui.money(total_deployed),
               help="Cumulative $ spent on all BUYs across history")
-    r2.metric("Total capital returned", f"${total_returned:,.0f}",
+    r2.metric("Total capital returned", ui.money(total_returned),
               help="Cumulative $ received from all SELLs")
-    r3.metric("Net cash invested", f"${net_cash_in:,.0f}",
+    r3.metric("Net cash invested", ui.money(net_cash_in),
               help="Deployed − Returned (net money put into the portfolio)")
-    r4.metric("Current capital invested", f"${current_invested:,.0f}",
+    r4.metric("Current capital invested", ui.money(current_invested),
               help="Cost basis of currently-open positions")
 
     st.markdown("---")
 
     col_r, col_u = st.columns(2)
     with col_r:
-        st.subheader("💵 Realized")
+        st.subheader("Realized")
         rg, rl, rn = st.columns(3)
-        rg.metric("Gains", f"${real_g:,.0f}",
+        rg.metric("Gains", ui.money(real_g),
                   help=f"{(all_positions['realized_pnl'] > 0).sum()} winning closed/partial positions")
-        rl.metric("Losses", f"${real_l:,.0f}",
+        rl.metric("Losses", ui.money(real_l),
                   help=f"{(all_positions['realized_pnl'] < 0).sum()} losing closed/partial positions")
-        rn.metric("Net realized", f"${net_real:,.0f}")
+        rn.metric("Net realized", ui.money(net_real))
 
     with col_u:
-        st.subheader("📈 Unrealized")
+        st.subheader("Unrealized")
         ug, ul, un = st.columns(3)
-        ug.metric("Gains", f"${unr_g:,.0f}",
+        ug.metric("Gains", ui.money(unr_g),
                   help=f"{(positions['unrealized_pnl'] > 0).sum()} winning open positions")
-        ul.metric("Losses", f"${unr_l:,.0f}",
+        ul.metric("Losses", ui.money(unr_l),
                   help=f"{(positions['unrealized_pnl'] < 0).sum()} losing open positions")
-        un.metric("Net unrealized", f"${net_unr:,.0f}")
+        un.metric("Net unrealized", ui.money(net_unr))
 
     # Aggregate TROIC = Σ lifetime value / Σ lifetime invested − 1 (across ALL
     # symbols ever traded, incl. closed). Single source of truth: lifetime_stats.
@@ -1440,7 +1439,7 @@ with tab_recap:
 
     st.markdown("---")
     t1, t2, t3, t4 = st.columns(4)
-    t1.metric("Total P&L", f"${total_pnl_recap:,.0f}",
+    t1.metric("Total P&L", ui.money(total_pnl_recap),
               help="Net realized + Net unrealized")
     t2.metric("Return on deployed capital", f"{return_on_deployed:+.2f}%")
     t3.metric("TROIC", f"{agg_troic*100:+.2f}%" if agg_troic is not None else "—",
@@ -1460,14 +1459,14 @@ with tab_recap:
     fig = go.Figure(go.Bar(
         x=bd["category"], y=bd["value"],
         marker_color=["#3ddc97", "#ff6b81", "#3ddc97", "#ff6b81"],
-        text=[f"${v:,.0f}" for v in bd["value"]],
+        text=[ui.money(v) for v in bd["value"]],
         textposition="outside",
     ))
     fig.update_layout(height=360, margin=dict(t=20, b=10, l=10, r=10),
                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                      yaxis=dict(gridcolor="#222", zerolinecolor="#666"),
+                      yaxis=dict(gridcolor=ui.GRID, zerolinecolor="#666"),
                       xaxis=dict(showgrid=False))
-    st.plotly_chart(fig, use_container_width=True)
+    ui.chart(fig, use_container_width=True)
 
     st.subheader("Top winners / losers (total P&L)")
     contrib = mt.position_contribution(all_positions).copy()
@@ -1538,13 +1537,13 @@ with tab_posttax:
         carry_residuo = float(post_tax["carryforward_uscente"].iloc[-1])
 
         pc1, pc2, pc3, pc4 = st.columns(4)
-        pc1.metric("Realized lordo (pre-tax)", f"€{total_realized_net:,.0f}",
+        pc1.metric("Realized lordo (pre-tax)", ui.money(total_realized_net, "€"),
                    help="Somma dei net realizzati per anno (gain + loss), prima delle imposte.")
-        pc2.metric("Imposta dovuta", f"€{total_imposta:,.0f}",
+        pc2.metric("Imposta dovuta", ui.money(total_imposta, "€"),
                    help="Somma delle imposte annue (26% sulla base imponibile dopo compensazione).")
-        pc3.metric("Post-tax", f"€{total_post_tax:,.0f}",
+        pc3.metric("Post-tax", ui.money(total_post_tax, "€"),
                    help="Realized netto meno imposta.")
-        pc4.metric("Carryforward residuo", f"€{carry_residuo:,.0f}",
+        pc4.metric("Carryforward residuo", ui.money(carry_residuo, "€"),
                    help="Minusvalenze non ancora compensate, riportabili agli anni successivi "
                         "(valore ≤ 0).")
 
@@ -1611,9 +1610,9 @@ with tab_posttax:
             fig_pt.update_layout(height=380, margin=dict(t=10, b=10, l=10, r=10),
                                  paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                  yaxis_title="€ cumulative P&L", xaxis=dict(showgrid=False),
-                                 yaxis=dict(gridcolor="#222", zerolinecolor="#666"),
+                                 yaxis=dict(gridcolor=ui.GRID, zerolinecolor="#666"),
                                  legend=dict(orientation="h", yanchor="bottom", y=1.02))
-            st.plotly_chart(fig_pt, use_container_width=True)
+            ui.chart(fig_pt, use_container_width=True)
             st.caption("Pre-tax = cumulative mark-to-market P&L (market value − net cash invested). "
                        "Post-tax subtracts cumulative tax as a step at each 31 Dec. "
                        "Approximation: the tax applies to realized gains only, here overlaid as an "
@@ -1633,7 +1632,7 @@ with tab_today:
     n_dn = int((td["day_change_$"] < 0).sum())
 
     t1, t2, t3, t4 = st.columns(4)
-    t1.metric("Total $ change today", f"${total_today_dollar:,.0f}")
+    t1.metric("Total $ change today", ui.money(total_today_dollar))
     t2.metric("Value-weighted %", f"{weighted_pct:+.2f}%")
     t3.metric("Up / Down", f"{n_up} / {n_dn}")
     if len(td):
@@ -1655,7 +1654,7 @@ with tab_today:
                       xaxis_title="$ change today",
                       xaxis=dict(zerolinecolor="#666"),
                       yaxis=dict(autorange="reversed"))
-    st.plotly_chart(fig, use_container_width=True)
+    ui.chart(fig, use_container_width=True)
 
     st.subheader("Detail")
     # RSI(14, Wilder) from the already-downloaded price history — no extra fetch.
@@ -2010,9 +2009,9 @@ with tab_perf:
         fig.update_layout(height=440, margin=dict(t=10, b=10, l=10, r=10),
                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                           yaxis_title="% return", xaxis=dict(showgrid=False),
-                          yaxis=dict(gridcolor="#222", zerolinecolor="#444"),
+                          yaxis=dict(gridcolor=ui.GRID, zerolinecolor="#444"),
                           legend=dict(orientation="h", yanchor="bottom", y=1.02))
-        st.plotly_chart(fig, use_container_width=True)
+        ui.chart(fig, use_container_width=True)
 
         # Equity curve ($) — market value vs net capital invested
         st.subheader("Equity curve ($)")
@@ -2036,9 +2035,9 @@ with tab_perf:
         fig2.update_layout(height=360, margin=dict(t=10, b=10, l=10, r=10),
                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                            yaxis_title="$", xaxis=dict(showgrid=False),
-                           yaxis=dict(gridcolor="#222"),
+                           yaxis=dict(gridcolor=ui.GRID),
                            legend=dict(orientation="h", yanchor="bottom", y=1.02))
-        st.plotly_chart(fig2, use_container_width=True)
+        ui.chart(fig2, use_container_width=True)
 
         # Cumulative absolute $ P&L over time
         st.subheader("Total P&L over time ($)")
@@ -2082,7 +2081,7 @@ with tab_perf:
             y=[total_pnl_curve.loc[peak_idx], total_pnl_curve.loc[trough_idx]],
             mode="markers+text",
             marker=dict(size=10, color=["#3ddc97", "#ff6b81"],
-                        line=dict(color="#0e1117", width=2)),
+                        line=dict(color=ui.CARD, width=2)),
             text=[f"Peak ${total_pnl_curve.loc[peak_idx]:,.0f}",
                   f"Trough ${total_pnl_curve.loc[trough_idx]:,.0f}"],
             textposition=["top center", "bottom center"],
@@ -2092,16 +2091,16 @@ with tab_perf:
         fig3.update_layout(height=380, margin=dict(t=20, b=10, l=10, r=10),
                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                            yaxis_title="$ P&L", xaxis=dict(showgrid=False),
-                           yaxis=dict(gridcolor="#222", zerolinecolor="#666"))
-        st.plotly_chart(fig3, use_container_width=True)
+                           yaxis=dict(gridcolor=ui.GRID, zerolinecolor="#666"))
+        ui.chart(fig3, use_container_width=True)
 
         pk1, pk2, pk3, pk4 = st.columns(4)
-        pk1.metric("Current P&L", f"${total_pnl_curve.iloc[-1]:,.0f}")
+        pk1.metric("Current P&L", ui.money(total_pnl_curve.iloc[-1]))
         pk2.metric("Peak P&L",
-                   f"${total_pnl_curve.loc[peak_idx]:,.0f}",
+                   ui.money(total_pnl_curve.loc[peak_idx]),
                    help=f"on {peak_idx.date()}")
         pk3.metric("Trough P&L",
-                   f"${total_pnl_curve.loc[trough_idx]:,.0f}",
+                   ui.money(total_pnl_curve.loc[trough_idx]),
                    help=f"on {trough_idx.date()}")
         pk4.metric("Days winning",
                    f"{int((total_pnl_curve >= 0).sum())} / {len(total_pnl_curve)}")
@@ -2154,7 +2153,7 @@ with tab_daily:
         worst = df_daily.loc[df_daily["pct"].idxmin()]
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric(f"{n_days}d $ change (market)", f"${total_dollar:,.0f}")
+        m1.metric(f"{n_days}d $ change (market)", ui.money(total_dollar))
         m2.metric(window_label, f"{window_growth*100:+.2f}%")
         m3.metric("Best day",
                   f"{best['pct']:+.2f}%",
@@ -2176,8 +2175,8 @@ with tab_daily:
         fig.update_layout(height=420, margin=dict(t=20, b=10, l=10, r=10),
                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                           yaxis_title="% return", xaxis=dict(showgrid=False),
-                          yaxis=dict(gridcolor="#222", zerolinecolor="#444"))
-        st.plotly_chart(fig, use_container_width=True)
+                          yaxis=dict(gridcolor=ui.GRID, zerolinecolor="#444"))
+        ui.chart(fig, use_container_width=True)
 
         st.subheader("Detail")
         df_show = df_daily.copy()
@@ -2260,7 +2259,7 @@ with tab_holdings:
                     return f"${m/1e9:.2f}B"
                 if m >= 1e6:
                     return f"${m/1e6:.1f}M"
-                return f"${m:,.0f}"
+                return ui.money(m)
 
             badge_parts = [f"**{sector}**"]
             if industry and industry != "—":
@@ -2292,10 +2291,10 @@ with tab_holdings:
             sk1, sk2, sk3, sk4, sk5, sk6, sk7 = st.columns(7)
             sk1.metric("Qty", f"{cur_qty:,.2f}")
             sk2.metric("Avg cost", f"${avg_cost_show:.2f}" if avg_cost_show is not None else "—")
-            sk3.metric("Mkt value", f"${mkt_value:,.0f}")
-            sk4.metric("Unrealized P&L", f"${unreal:,.0f}", f"{gain_pct:+.2f}%")
-            sk5.metric("Realized P&L", f"${cur_real:,.0f}")
-            sk6.metric("Total P&L", f"${total_pnl_sym:,.0f}")
+            sk3.metric("Mkt value", ui.money(mkt_value))
+            sk4.metric("Unrealized P&L", ui.money(unreal), f"{gain_pct:+.2f}%")
+            sk5.metric("Realized P&L", ui.money(cur_real))
+            sk6.metric("Total P&L", ui.money(total_pnl_sym))
             sk7.metric("XIRR", f"{sym_xirr*100:.2f}%" if sym_xirr is not None else "—",
                        help="Money-weighted annualized return")
 
@@ -2316,11 +2315,11 @@ with tab_holdings:
                 ss1, ss2, ss3, ss4 = st.columns(4)
                 ss1.metric("Avg sale price", f"${avg_sale_price:.2f}",
                            help=f"{total_sell_qty:,.0f} shares sold, weighted average")
-                ss2.metric("$ since sale", f"${ss_dollar:,.0f}",
+                ss2.metric("$ since sale", ui.money(ss_dollar),
                            help="Positive = price went up since sale (missed gains). "
                                 "Negative = price went down since (sold well).")
                 ss3.metric("% since sale", f"{ss_pct:+.2f}%")
-                ss4.metric("If you'd held all", f"${hold_value_now:,.0f}",
+                ss4.metric("If you'd held all", ui.money(hold_value_now),
                            f"{missed:+,.0f} vs actual",
                            help=f"Value today if you'd never sold ({hold_qty:,.0f} shares × "
                                 f"${cur_price:.2f}). The delta shows how much you missed "
@@ -2407,7 +2406,7 @@ with tab_holdings:
                     mode="markers+text",
                     marker=dict(size=[14, 18, 14],
                                 color=["#7c8eff", "#3ddc97", "#7c8eff"],
-                                line=dict(color="#0e1117", width=2)),
+                                line=dict(color=ui.CARD, width=2)),
                     text=[f"Low ${t_low:.2f}", f"Mean ${target:.2f}", f"High ${t_high:.2f}"],
                     textposition=["bottom center", "top center", "bottom center"],
                     textfont=dict(color="#e8edf5"),
@@ -2416,7 +2415,7 @@ with tab_holdings:
                 fig_t.add_trace(go.Scatter(
                     x=[cur_price], y=[0], mode="markers+text",
                     marker=dict(size=16, color="#f4b942", symbol="diamond",
-                                line=dict(color="#0e1117", width=2)),
+                                line=dict(color=ui.CARD, width=2)),
                     text=[f"Now ${cur_price:.2f}"], textposition="top center",
                     textfont=dict(color="#f4b942"), name="Current",
                     showlegend=False, hoverinfo="skip",
@@ -2428,7 +2427,7 @@ with tab_holdings:
                     xaxis=dict(showgrid=False, zeroline=False,
                                title="Analyst price targets vs current"),
                 )
-                st.plotly_chart(fig_t, use_container_width=True)
+                ui.chart(fig_t, use_container_width=True)
 
             # Annual & quarterly financials
             def _scale_axis(values):
@@ -2482,10 +2481,10 @@ with tab_holdings:
                         margin=dict(t=30, b=10, l=10, r=10),
                         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                         yaxis_title=unit,
-                        yaxis=dict(gridcolor="#222"), xaxis=dict(showgrid=False),
+                        yaxis=dict(gridcolor=ui.GRID), xaxis=dict(showgrid=False),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02),
                     )
-                    st.plotly_chart(fig_a, use_container_width=True)
+                    ui.chart(fig_a, use_container_width=True)
 
             with ff_col2:
                 st.markdown("**Quarterly revenue & EBITDA (last 5 quarters)**")
@@ -2533,10 +2532,10 @@ with tab_holdings:
                         margin=dict(t=30, b=10, l=10, r=10),
                         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                         yaxis_title=unit,
-                        yaxis=dict(gridcolor="#222"), xaxis=dict(showgrid=False),
+                        yaxis=dict(gridcolor=ui.GRID), xaxis=dict(showgrid=False),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02),
                     )
-                    st.plotly_chart(fig_q, use_container_width=True)
+                    ui.chart(fig_q, use_container_width=True)
 
             if h.empty:
                 st.info(f"No price history available for {selected}.")
@@ -2558,7 +2557,7 @@ with tab_holdings:
                         x=buys["trade_date"], y=buys["price"], mode="markers",
                         marker=dict(symbol="triangle-up", color="#3ddc97",
                                     size=marker_size(buys["qty"]),
-                                    line=dict(color="#0e1117", width=1.5)),
+                                    line=dict(color=ui.CARD, width=1.5)),
                         name="Buy",
                         text=[f"BUY {q:,.0f} @ ${p:.2f}" for q, p in zip(buys["qty"], buys["price"])],
                         hovertemplate="%{text}<br>%{x|%Y-%m-%d}<extra></extra>",
@@ -2568,7 +2567,7 @@ with tab_holdings:
                         x=sells["trade_date"], y=sells["price"], mode="markers",
                         marker=dict(symbol="triangle-down", color="#ff6b81",
                                     size=marker_size(sells["qty"]),
-                                    line=dict(color="#0e1117", width=1.5)),
+                                    line=dict(color=ui.CARD, width=1.5)),
                         name="Sell",
                         text=[f"SELL {q:,.0f} @ ${p:.2f}" for q, p in zip(sells["qty"], sells["price"])],
                         hovertemplate="%{text}<br>%{x|%Y-%m-%d}<extra></extra>",
@@ -2584,11 +2583,11 @@ with tab_holdings:
                     height=520, margin=dict(t=20, b=10, l=10, r=10),
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                     yaxis_title="$", xaxis=dict(showgrid=False),
-                    yaxis=dict(gridcolor="#222"),
+                    yaxis=dict(gridcolor=ui.GRID),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02),
                     title=f"{selected} — price + transactions",
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                ui.chart(fig, use_container_width=True)
 
                 # Per-trade table
                 tt = sym_tx[["trade_date", "side", "qty", "price", "cashflow"]].copy()
@@ -2633,13 +2632,13 @@ with tab_alloc:
                 agg = merged.groupby(col)["market_value"].sum().reset_index().sort_values("market_value", ascending=False)
                 agg["pct"] = agg["market_value"] / agg["market_value"].sum() * 100
                 fig = px.pie(agg, values="market_value", names=col, hole=0.5,
-                             color_discrete_sequence=px.colors.sequential.Tealgrn_r)
+                             color_discrete_sequence=ui.PIE_SEQ)
                 fig.update_traces(textposition="outside", textinfo="label+percent",
-                                  marker=dict(line=dict(color="#0e1117", width=2)))
+                                  marker=dict(line=dict(color=ui.CARD, width=2)))
                 fig.update_layout(showlegend=False, height=320,
                                   margin=dict(t=10, b=10, l=10, r=10),
                                   paper_bgcolor="rgba(0,0,0,0)")
-                st.plotly_chart(fig, use_container_width=True)
+                ui.chart(fig, use_container_width=True)
 
         st.subheader("Treemap (sector → holding)")
         tm = merged.copy()
@@ -2647,13 +2646,13 @@ with tab_alloc:
         fig = px.treemap(
             tm, path=[px.Constant("Portfolio"), "sector", "symbol"],
             values="market_value", color="return_pct",
-            color_continuous_scale="RdYlGn", color_continuous_midpoint=0,
+            color_continuous_scale=ui.DIVERGING, color_continuous_midpoint=0,
             hover_data={"market_value": ":,.0f", "return_pct": ":.1f"},
         )
         fig.update_traces(textinfo="label+value+percent parent")
         fig.update_layout(height=520, margin=dict(t=10, b=10, l=10, r=10),
                           paper_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True)
+        ui.chart(fig, use_container_width=True)
 
 # ---------- Risk ------------------------------------------------------------
 
@@ -2686,8 +2685,8 @@ with tab_risk:
         fig.update_layout(height=360, margin=dict(t=10, b=10, l=10, r=10),
                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                           yaxis_title="% from peak", xaxis=dict(showgrid=False),
-                          yaxis=dict(gridcolor="#222"))
-        st.plotly_chart(fig, use_container_width=True)
+                          yaxis=dict(gridcolor=ui.GRID))
+        ui.chart(fig, use_container_width=True)
 
         st.subheader("Daily return distribution")
         rets = mt.daily_returns(twr_growth) * 100
@@ -2695,8 +2694,8 @@ with tab_risk:
         fig2.update_layout(height=320, margin=dict(t=10, b=10, l=10, r=10),
                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                            xaxis_title="daily % return", yaxis_title="days",
-                           showlegend=False, yaxis=dict(gridcolor="#222"))
-        st.plotly_chart(fig2, use_container_width=True)
+                           showlegend=False, yaxis=dict(gridcolor=ui.GRID))
+        ui.chart(fig2, use_container_width=True)
 
         # Per-position volatility
         if not hist.empty:
@@ -2716,7 +2715,7 @@ with tab_risk:
                                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                xaxis_title="annualized volatility %",
                                yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig3, use_container_width=True)
+            ui.chart(fig3, use_container_width=True)
 
 # ---------- Dividends -------------------------------------------------------
 
@@ -2748,7 +2747,7 @@ with tab_div:
             yld = (total_div / total_mv * 100.0) if total_mv else 0.0
 
             d1, d2, d3 = st.columns(3)
-            d1.metric("Total dividends (est.)", f"${total_div:,.0f}")
+            d1.metric("Total dividends (est.)", ui.money(total_div))
             d2.metric("Dividend yield (on MV)", f"{yld:.2f}%")
             d3.metric("Paying positions", f"{div_df['symbol'].nunique()}")
 
@@ -2756,13 +2755,13 @@ with tab_div:
             fig = go.Figure(go.Bar(
                 x=by_sym["total"], y=by_sym["symbol"], orientation="h",
                 marker_color="#3ddc97",
-                text=[f"${v:,.0f}" for v in by_sym["total"]], textposition="outside",
+                text=[ui.money(v) for v in by_sym["total"]], textposition="outside",
             ))
             fig.update_layout(height=max(300, len(by_sym) * 28),
                               margin=dict(t=10, b=10, l=10, r=60),
                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                               xaxis_title="$ dividends", yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig, use_container_width=True)
+            ui.chart(fig, use_container_width=True)
 
             st.dataframe(
                 div_df, use_container_width=True, hide_index=True,
