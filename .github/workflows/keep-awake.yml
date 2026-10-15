@@ -1,0 +1,23 @@
+name: Keep app awake
+
+# Streamlit Community Cloud puts apps to sleep after a stretch without visits,
+# and waking one takes a click plus ~1 minute. A visit every 6 hours avoids that.
+# Set the app URL once: repo Settings → Secrets and variables → Actions →
+# Variables → New variable, name APP_URL, value https://<your-app>.streamlit.app
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  visit:
+    if: ${{ vars.APP_URL != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install playwright==1.55.0 && python -m playwright install --with-deps chromium
+      - run: python scripts/keep_awake.py "${{ vars.APP_URL }}"

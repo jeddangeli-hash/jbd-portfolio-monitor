@@ -1,6 +1,8 @@
 """yfinance adapter — quotes, history, metadata, dividends. Single seam for swapping data sources."""
 from __future__ import annotations
 
+import re
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
 import pandas as pd
@@ -12,27 +14,88 @@ except ImportError:
     HAS_YF = False
 
 
+# Exchange suffixes quoted in EUR. Lets the batched path skip the per-symbol
+# currency lookup for the common cases; anything not recognised falls back to it.
+_EUR_SUFFIXES = (".MI", ".DE", ".F", ".SG", ".BE", ".DU", ".MU", ".HM", ".PA",
+                 ".AS", ".MC", ".BR", ".LS", ".VI", ".HE", ".IR")
+_ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+
+
+def guess_currency(symbol: str) -> str | None:
+    """Quote currency from the ticker's shape, or None when it can't be told."""
+    s = symbol.upper()
+    if s.endswith("=X"):                      # FX pair, e.g. EURUSD=X → USD
+        return s[3:6] if len(s) == 8 else None
+    if "-" in s:                              # crypto pair, e.g. BTC-USD
+        tail = s.rsplit("-", 1)[1]
+        return tail if tail in ("USD", "EUR", "GBP") else None
+    if s.endswith(_EUR_SUFFIXES):
+        return "EUR"
+    if "." not in s and not _ISIN.match(s):   # plain US ticker
+        return "USD"
+    return None
+
+
+def _quote_one(sym: str) -> tuple[str, dict | None]:
+    """Per-symbol fast_info lookup (slow path: one request per symbol)."""
+    try:
+        info = yf.Ticker(sym).fast_info
+        price = float(info.get("last_price") or info.get("lastPrice") or 0) or None
+        prev = float(info.get("previous_close") or info.get("previousClose") or 0) or None
+        ccy = info.get("currency") or "USD"
+        if price:
+            return sym, {"price": price, "prev_close": prev or price, "currency": ccy}
+    except Exception:
+        pass
+    return sym, None
+
+
+def _closes_from_download(data: pd.DataFrame, symbols: list[str]) -> dict[str, pd.Series]:
+    """Per-symbol Close series from a yf.download frame (either column layout)."""
+    out: dict[str, pd.Series] = {}
+    if data is None or data.empty:
+        return out
+    if isinstance(data.columns, pd.MultiIndex):
+        lvl0 = set(data.columns.get_level_values(0))
+        for sym in symbols:
+            if sym in lvl0 and "Close" in data[sym].columns:
+                out[sym] = data[sym]["Close"].dropna()
+    elif "Close" in data.columns and len(symbols) == 1:
+        out[symbols[0]] = data["Close"].dropna()
+    return out
+
+
 def fetch_quotes(symbols: list[str]) -> dict[str, dict]:
+    """Last price, previous close and currency per symbol.
+
+    Fast path: ONE batched daily download for every symbol whose currency can be
+    told from the ticker. Whatever that misses (unknown currency, no data) goes
+    through the per-symbol lookup, run in parallel.
+    """
     if not HAS_YF or not symbols:
         return {}
     out: dict[str, dict] = {}
-    try:
-        tickers = yf.Tickers(" ".join(symbols))
-        for sym in symbols:
-            try:
-                t = tickers.tickers.get(sym)
-                if t is None:
+    batch = [s for s in symbols if guess_currency(s)]
+    if batch:
+        try:
+            data = yf.download(tickers=" ".join(batch), period="5d", interval="1d",
+                               auto_adjust=False, group_by="ticker", progress=False,
+                               threads=True)
+            for sym, closes in _closes_from_download(data, batch).items():
+                if len(closes) == 0:
                     continue
-                info = t.fast_info
-                price = float(info.get("last_price") or info.get("lastPrice") or 0) or None
-                prev = float(info.get("previous_close") or info.get("previousClose") or 0) or None
-                ccy = info.get("currency") or "USD"
+                price = float(closes.iloc[-1])
+                prev = float(closes.iloc[-2]) if len(closes) > 1 else price
                 if price:
-                    out[sym] = {"price": price, "prev_close": prev or price, "currency": ccy}
-            except Exception:
-                continue
-    except Exception:
-        pass
+                    out[sym] = {"price": price, "prev_close": prev, "currency": guess_currency(sym)}
+        except Exception:
+            pass
+    rest = [s for s in symbols if s not in out]
+    if rest:
+        with ThreadPoolExecutor(max_workers=min(16, len(rest))) as ex:
+            for sym, q in ex.map(_quote_one, rest):
+                if q:
+                    out[sym] = q
     return out
 
 
@@ -64,11 +127,13 @@ def fetch_metadata(symbol: str) -> dict:
 
 
 def fetch_metadata_bulk(symbols: list[str]) -> pd.DataFrame:
-    rows = []
-    for s in symbols:
-        m = fetch_metadata(s)
-        rows.append({"symbol": s, **m})
-    return pd.DataFrame(rows)
+    # One slow get_info() per symbol — run them in parallel.
+    symbols = list(symbols)
+    if not symbols:
+        return pd.DataFrame(columns=["symbol"])
+    with ThreadPoolExecutor(max_workers=min(16, len(symbols))) as ex:
+        metas = list(ex.map(fetch_metadata, symbols))
+    return pd.DataFrame([{"symbol": s, **m} for s, m in zip(symbols, metas)])
 
 
 @lru_cache(maxsize=128)
