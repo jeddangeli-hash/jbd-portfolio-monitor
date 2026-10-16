@@ -138,6 +138,19 @@ hr { border-color: var(--line) !important; opacity: .7; }
 .file-name { font-weight: 600; font-size: .92rem; line-height: 1.1; }
 .file-meta { color: var(--muted); font-size: .74rem; line-height: 1.3; margin-top: 2px; }
 
+/* ---------- earnings strip ---------- */
+.earn { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 2px 0 14px; }
+.earn-title { color: var(--muted); font-size: .72rem; font-weight: 600; letter-spacing: .08em;
+  text-transform: uppercase; margin-right: 4px; }
+.earn-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
+  background: var(--card); border: 1px solid var(--line); font-size: .84rem; animation: fadeUp .4s ease both; }
+.earn-chip b { color: var(--text); }
+.earn-tag { font-size: .72rem; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+.earn-tag.pre { background: rgba(245,165,36,.16); color: #f5a524; }
+.earn-tag.after { background: rgba(167,139,250,.18); color: #a78bfa; }
+.earn-tag.mid, .earn-tag.na { background: rgba(148,163,184,.16); color: #94a3b8; }
+.earn-sub { color: var(--muted); font-size: .78rem; }
+
 /* ---------- mobile ---------- */
 @media (max-width: 1100px) { .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 640px) {
@@ -238,3 +251,25 @@ def file_card(cls: str, label: str, meta: str) -> str:
     return (f'<div class="file-card"><div class="file-ico" style="background:{color}">{code}</div>'
             f'<div><div class="file-name">{escape(label)}</div>'
             f'<div class="file-meta">{escape(meta)}</div></div></div>')
+
+
+_EARN_TAG = {"Pre-market": "pre", "After-market": "after", "In seduta": "mid", "Orario n.d.": "na"}
+
+
+def earnings_strip(items: list[dict], values: dict[str, float]) -> None:
+    """Chips for holdings reporting today / next business day."""
+    if not items:
+        st.markdown('<div class="earn"><span class="earn-title">Trimestrali</span>'
+                    '<span class="earn-sub">nessun titolo in portafoglio oggi o domani</span></div>',
+                    unsafe_allow_html=True)
+        return
+    chips = []
+    for e in items:
+        v = values.get(e["symbol"])
+        sub = f'<span class="earn-sub">{money(v)} in portafoglio</span>' if v else ""
+        chips.append(f'<span class="earn-chip"><b>{escape(e["symbol"])}</b>'
+                     f'<span class="earn-sub">{escape(e["day"])}</span>'
+                     f'<span class="earn-tag {_EARN_TAG[e["session"]]}">{escape(e["session"])}</span>'
+                     f'{sub}</span>')
+    st.markdown('<div class="earn"><span class="earn-title">Trimestrali</span>'
+                + "".join(chips) + "</div>", unsafe_allow_html=True)

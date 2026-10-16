@@ -197,6 +197,41 @@ def fetch_intraday_bulk(symbols: list[str], period: str = "5d",
     return frame
 
 
+def fetch_earnings_dates(symbol: str) -> list[tuple[pd.Timestamp, bool]]:
+    """Recent and upcoming earnings releases as (UTC timestamp, has_time).
+
+    get_earnings_dates carries the release time (that is what tells pre-market
+    from after-market); when it fails, the calendar's date-only entries are used
+    with has_time=False.
+    """
+    if not HAS_YF:
+        return []
+    t = yf.Ticker(symbol)
+    try:
+        df = t.get_earnings_dates(limit=8)
+        if df is not None and not df.empty:
+            idx = pd.DatetimeIndex(df.index)
+            idx = idx.tz_localize("America/New_York") if idx.tz is None else idx
+            return [(ts, True) for ts in idx.tz_convert("UTC")]
+    except Exception:
+        pass
+    try:
+        cal = t.calendar or {}
+        days = cal.get("Earnings Date") if isinstance(cal, dict) else None
+        return [(pd.Timestamp(d).tz_localize("America/New_York").tz_convert("UTC"), False)
+                for d in (days or [])]
+    except Exception:
+        return []
+
+
+def fetch_earnings_bulk(symbols: list[str]) -> dict[str, list[tuple[pd.Timestamp, bool]]]:
+    symbols = list(symbols)
+    if not symbols:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(16, len(symbols))) as ex:
+        return dict(zip(symbols, ex.map(fetch_earnings_dates, symbols)))
+
+
 @lru_cache(maxsize=128)
 def fetch_dividends(symbol: str) -> pd.Series:
     """Returns Series of per-share dividend amounts, indexed by ex-date."""
