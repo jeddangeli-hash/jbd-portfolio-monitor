@@ -1156,6 +1156,9 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
         with np.errstate(divide="ignore", invalid="ignore"):
             simple_curve = (value_series_g - cum_deposits_curve) / cum_deposits_curve
         simple_curve = simple_curve.where(cum_deposits_curve > 1e-6)
+        # Same rebase as the per-class tab when history starts after the first trade.
+        if len(tx_eur) and tx_eur["trade_date"].min() < value_series_g.index[0]:
+            simple_curve = trend.period_curve(value_series_g, cf_series_g, value_series_g.index[0])
 
         if chart_mode_g.startswith("TWR"):
             port_y = (twr_g - 1) * 100
@@ -2358,6 +2361,13 @@ with tab_perf:
                 simple_curve = (value_series - cum_deposits_curve) / cum_deposits_curve
             # Mask days where net cash invested ≤ 0 (undefined simple return)
             simple_curve = simple_curve.where(cum_deposits_curve > 1e-6)
+            # When the History period starts after the first trade, the line above
+            # would open at the since-inception return (e.g. +37%) while the
+            # benchmark opens at 0. Rebase it to the window's first day instead.
+            win_start = value_series.index[0]
+            rebased = tx["trade_date"].min() < win_start
+            if rebased:
+                simple_curve = trend.period_curve(value_series, cf_series, win_start)
 
             if chart_mode.startswith("TWR"):
                 port_y = (twr_growth - 1) * 100
@@ -2369,6 +2379,10 @@ with tab_perf:
                 sub = f"Simple return vs {benchmark}" if benchmark != "None" else "Simple return"
 
             st.subheader(sub)
+            if rebased and not chart_mode.startswith("TWR"):
+                st.caption(f"Parte da 0 il {win_start:%d/%m/%Y}, inizio del periodo scelto in "
+                           f"*History period*, come {benchmark}. Il rendimento dall'inizio di "
+                           "tutto è nei riquadri in alto.")
             fig = go.Figure()
             fig.add_trace(go.Scatter(
                 x=port_y.index, y=port_y.values, mode="lines",
