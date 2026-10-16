@@ -65,10 +65,16 @@ def _check_password() -> bool:
         return True
 
     def _submit() -> None:
+        # The callback can fire twice for one entry (Enter, then blur — common on
+        # iPhone). The first call already logged in and dropped the key, so the
+        # second must neither crash on the missing key nor flip auth back off.
+        if st.session_state.get("auth_ok"):
+            return
+        typed = str(st.session_state.get("auth_pw") or "")
         # compare_digest: constant-time, so timing can't leak the password.
-        if hmac.compare_digest(st.session_state["auth_pw"], str(expected)):
+        if hmac.compare_digest(typed, str(expected)):
             st.session_state["auth_ok"] = True
-            del st.session_state["auth_pw"]  # never keep the typed password
+            st.session_state.pop("auth_pw", None)  # never keep the typed password
         else:
             st.session_state["auth_ok"] = False
 
