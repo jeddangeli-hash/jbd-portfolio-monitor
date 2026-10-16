@@ -1423,14 +1423,60 @@ price_map = {s: q["price"] for s, q in quotes.items()}
 prev_map = {s: q["prev_close"] for s, q in quotes.items()}
 
 # Display currency of this class view: the currency most of its market value is
-# quoted in (Borsa Italiana ETFs → €). The class view does not convert, so any
-# position quoted in another currency is flagged under the KPIs.
+# quoted in (Borsa Italiana ETFs → €). Positions quoted in another currency are
+# converted into it below.
 _pos_ccy = positions["symbol"].map(
     lambda s: (quotes.get(s) or {}).get("currency") or pr.guess_currency(s) or "USD")
 _pos_mv = positions["qty"] * positions["symbol"].map(price_map).fillna(positions["snapshot_price"])
 CLASS_CCY = str(_pos_mv.groupby(_pos_ccy).sum().idxmax()) if len(positions) else "USD"
 CS = ui.CURRENCY_SYMBOLS.get(CLASS_CCY, CLASS_CCY + " ")
 _other_ccy = sorted(positions.loc[_pos_ccy != CLASS_CCY, "symbol"])
+
+# Convert every symbol quoted in another currency (e.g. RACE.MI in Stocks) into the
+# class currency at today's rate, at the source — transactions, live quotes, and
+# further down price history, dividends and fundamentals — so all tabs add up in
+# one currency. FX_MULT: symbol → class-currency units per 1 unit of its currency.
+FX_MULT: dict[str, float] = {}
+for _s in sorted(set(tx["symbol"])):
+    _c = (quotes.get(_s) or {}).get("currency") or pr.guess_currency(_s)
+    if _c and _c != CLASS_CCY:
+        _r = get_fx_rate(f"{_c}{CLASS_CCY}=X") if use_live else None
+        if _r:
+            FX_MULT[_s] = _r
+if FX_MULT:
+    _m = tx["symbol"].map(FX_MULT).fillna(1.0)
+    tx = tx.assign(price=tx["price"] * _m, cashflow=tx["cashflow"] * _m,
+                   snapshot_price=pd.to_numeric(tx["snapshot_price"], errors="coerce") * _m)
+    all_positions = pf.build_positions(tx)
+    positions = all_positions[all_positions["qty"] > 1e-6].reset_index(drop=True)
+    price_map = {s: p * FX_MULT.get(s, 1.0) for s, p in price_map.items()}
+    prev_map = {s: p * FX_MULT.get(s, 1.0) for s, p in prev_map.items()}
+_fx_note = {s: FX_MULT[s] for s in _other_ccy if s in FX_MULT}
+_other_ccy = [s for s in _other_ccy if s not in FX_MULT]
+
+
+def _fx(sym: str) -> float:
+    return FX_MULT.get(sym, 1.0)
+
+
+def _fx_stats(sym: str, d: dict) -> dict:
+    """Key stats with price-like fields in the class currency."""
+    m = _fx(sym)
+    if m == 1.0 or not d:
+        return d
+    out = dict(d)
+    for k in ("target_mean", "target_low", "target_high", "market_cap"):
+        if isinstance(out.get(k), (int, float)) and out[k] is not None:
+            out[k] = out[k] * m
+    return out
+
+
+def _fx_frame(sym: str, df: pd.DataFrame) -> pd.DataFrame:
+    m = _fx(sym)
+    if m == 1.0 or df is None or df.empty:
+        return df
+    num = df.select_dtypes("number").columns
+    return df.assign(**{c: df[c] * m for c in num})
 
 positions = pf.enrich_with_prices(positions, price_map)
 positions["prev_close"] = positions["symbol"].map(prev_map).fillna(positions["snapshot_price"])
@@ -1461,6 +1507,10 @@ port_xirr = pf.portfolio_xirr(tx, positions, today)
 ts = datetime.now().strftime("%Y-%m-%d %H:%M")
 src = "live (yfinance)" if use_live and quotes else "snapshot"
 st.caption(f"As of {ts} · prices: **{src}** · {len(positions)} open positions · benchmark: **{benchmark}**")
+if _fx_note:
+    st.caption(f"💱 Convertiti in {CLASS_CCY} al cambio di oggi: " + " · ".join(
+        f"{s} ({(quotes.get(s) or {}).get('currency') or pr.guess_currency(s)}→{CLASS_CCY} {r:.4f})"
+        for s, r in _fx_note.items()))
 if _other_ccy:
     st.caption(f"ℹ️ Importi in **{CLASS_CCY}**. {', '.join(_other_ccy)} "
                f"{'è quotato' if len(_other_ccy) == 1 else 'sono quotati'} in un'altra valuta "
@@ -1514,6 +1564,8 @@ if period == "Dall'inizio":
     period = next((p for p, d in (("1y", 360), ("2y", 725), ("5y", 1820), ("10y", 3645))
                    if _age_days <= d), "max")
 hist = get_history(tuple(all_symbols_ever), period) if pr.HAS_YF else pd.DataFrame()
+if FX_MULT and not hist.empty:
+    hist = hist.assign(**{s: hist[s] * m for s, m in FX_MULT.items() if s in hist.columns})
 twr_growth = pd.Series(dtype=float)
 bench_growth = pd.Series(dtype=float)
 value_series = pd.Series(dtype=float)
@@ -2610,7 +2662,7 @@ with tab_holdings:
 
             if selected:
                 with st.spinner(f"Loading {selected}…"):
-                    h = pr.fetch_history(selected, period=holding_period)
+                    h = _fx_frame(selected, pr.fetch_history(selected, period=holding_period))
 
                 sym_tx = tx[tx["symbol"] == selected].sort_values("trade_date").copy()
                 buys = sym_tx[sym_tx["side"] == "BUY"]
@@ -2642,7 +2694,7 @@ with tab_holdings:
                 avg_cost_show = (cur_inv / cur_qty) if cur_qty > 1e-6 else avg_buy_lifetime
 
                 # Company description (yfinance fundamentals — same fetch reused below)
-                key_top = get_key_stats(selected)
+                key_top = _fx_stats(selected, get_key_stats(selected))
                 company_name = key_top.get("long_name") or selected
                 sector = key_top.get("sector") or "—"
                 industry = key_top.get("industry") or "—"
@@ -2731,9 +2783,9 @@ with tab_holdings:
                 st.markdown("---")
                 st.markdown("##### Key data")
                 with st.spinner("Loading fundamentals…"):
-                    key = get_key_stats(selected)
-                    ann_fin = get_annual_financials(selected)
-                    qtr_fin = get_quarterly_financials(selected)
+                    key = _fx_stats(selected, get_key_stats(selected))
+                    ann_fin = _fx_frame(selected, get_annual_financials(selected))
+                    qtr_fin = _fx_frame(selected, get_quarterly_financials(selected))
 
                 def _fmt_num(n):
                     if n is None or pd.isna(n):
@@ -3132,7 +3184,7 @@ with tab_div:
             rows = []
             for _, p in positions.iterrows():
                 sym = p["symbol"]
-                divs = get_dividends(sym)
+                divs = get_dividends(sym) * _fx(sym)
                 if divs.empty:
                     continue
                 first = pd.Timestamp(p["first_buy"])
