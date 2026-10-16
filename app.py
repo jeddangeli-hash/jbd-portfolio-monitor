@@ -178,7 +178,8 @@ with st.sidebar:
                          help="Valuta di Generale e Andamento (le viste per classe restano in valuta originale)")
     use_live = st.toggle("Fetch live prices", value=True)
     benchmark = st.selectbox("Benchmark", ["SPY", "QQQ", "VTI", "ACWI", "URTH", "None"], index=0)
-    period = st.selectbox("History period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
+    period = st.selectbox("History period", ["Dall'inizio", "1mo", "3mo", "6mo", "1y", "2y", "5y"],
+                          index=0, help="Dall'inizio = dal primo trade della classe")
     rf_rate = st.slider("Risk-free rate (Sharpe)", 0.0, 0.10, 0.04, 0.005)
 
     # ----- Bond / BTP (manual, JSON-persisted) — loaded only on demand --------
@@ -1156,6 +1157,9 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
         with np.errstate(divide="ignore", invalid="ignore"):
             simple_curve = (value_series_g - cum_deposits_curve) / cum_deposits_curve
         simple_curve = simple_curve.where(cum_deposits_curve > 1e-6)
+        # Same rebase as the per-class tab when history starts after the first trade.
+        if len(tx_eur) and tx_eur["trade_date"].min() < value_series_g.index[0]:
+            simple_curve = trend.period_curve(value_series_g, cf_series_g, value_series_g.index[0])
 
         if chart_mode_g.startswith("TWR"):
             port_y = (twr_g - 1) * 100
@@ -1503,6 +1507,12 @@ ui.kpi_grid([
 #   - the value of closed positions during the time they were held
 #   - the cash inflow/outflow when they were sold
 # Otherwise the "Total P&L over time" chart misses every closed position's realized P&L.
+# "Dall'inizio": the shortest Yahoo period that reaches back to this class's first
+# trade, so the charts start on that day (trim_to_first_holding drops the rest).
+if period == "Dall'inizio":
+    _age_days = (pd.Timestamp(date.today()) - tx["trade_date"].min()).days
+    period = next((p for p, d in (("1y", 360), ("2y", 725), ("5y", 1820), ("10y", 3645))
+                   if _age_days <= d), "max")
 hist = get_history(tuple(all_symbols_ever), period) if pr.HAS_YF else pd.DataFrame()
 twr_growth = pd.Series(dtype=float)
 bench_growth = pd.Series(dtype=float)
@@ -2358,6 +2368,13 @@ with tab_perf:
                 simple_curve = (value_series - cum_deposits_curve) / cum_deposits_curve
             # Mask days where net cash invested ≤ 0 (undefined simple return)
             simple_curve = simple_curve.where(cum_deposits_curve > 1e-6)
+            # When the History period starts after the first trade, the line above
+            # would open at the since-inception return (e.g. +37%) while the
+            # benchmark opens at 0. Rebase it to the window's first day instead.
+            win_start = value_series.index[0]
+            rebased = tx["trade_date"].min() < win_start
+            if rebased:
+                simple_curve = trend.period_curve(value_series, cf_series, win_start)
 
             if chart_mode.startswith("TWR"):
                 port_y = (twr_growth - 1) * 100
@@ -2369,6 +2386,10 @@ with tab_perf:
                 sub = f"Simple return vs {benchmark}" if benchmark != "None" else "Simple return"
 
             st.subheader(sub)
+            if rebased and not chart_mode.startswith("TWR"):
+                st.caption(f"Parte da 0 il {win_start:%d/%m/%Y}, inizio del periodo scelto in "
+                           f"*History period*, come {benchmark}. Il rendimento dall'inizio di "
+                           "tutto è nei riquadri in alto.")
             fig = go.Figure()
             fig.add_trace(go.Scatter(
                 x=port_y.index, y=port_y.values, mode="lines",
