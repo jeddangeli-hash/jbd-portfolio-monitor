@@ -147,3 +147,38 @@ def benchmark_curve(prices: pd.Series, base: pd.Timestamp | None) -> pd.Series:
         return pd.Series(dtype=float)
     after = p[p.index > base]
     return pd.concat([pd.Series([0.0], index=[base]), after / p0 - 1.0])
+
+
+US_TZ = "America/New_York"
+_REG_OPEN, _REG_CLOSE = 9 * 60 + 30, 16 * 60  # regular session, minutes after midnight NY
+
+
+def is_us_listing(symbol: str) -> bool:
+    """US-listed stock/ETF: the only kind Yahoo quotes in pre/after-market."""
+    s = symbol.upper()
+    return not ("." in s or "-" in s or "=" in s or s.startswith("^")) and len(s) <= 5
+
+
+def extended_move(bars: pd.Series, ref_close: float | None = None):
+    """Latest pre/after-market price vs the last regular close.
+
+    `bars` are intraday closes INCLUDING extended hours (UTC index). Returns
+    (label "Pre"/"After", extended price, reference close) or None when the
+    latest bar is inside the regular session (nothing to report) or there is
+    no data. `ref_close` (official daily close) wins over the last regular bar.
+    """
+    p = bars.dropna()
+    if p.empty:
+        return None
+    local = p.index.tz_convert(US_TZ)
+    mins = local.hour * 60 + local.minute
+    last = int(mins[-1])
+    if _REG_OPEN <= last < _REG_CLOSE:
+        return None
+    label = "After" if last >= _REG_CLOSE else "Pre"
+    if not ref_close:
+        regular = p[(mins >= _REG_OPEN) & (mins < _REG_CLOSE)]
+        if regular.empty:
+            return None
+        ref_close = float(regular.iloc[-1])
+    return label, float(p.iloc[-1]), float(ref_close)

@@ -80,3 +80,26 @@ def test_benchmark_curve_uses_last_price_on_or_before_base():
     assert c.index[0] == base and c.iloc[0] == 0.0
     assert c.tolist()[1:] == pytest.approx([0.02, -0.01])
     assert trend.benchmark_curve(spx, None).empty
+
+
+def _bars(times_ny, prices):
+    idx = pd.DatetimeIndex(times_ny).tz_localize(trend.US_TZ).tz_convert("UTC")
+    return pd.Series(prices, index=idx, dtype=float)
+
+
+def test_extended_move_after_hours_uses_official_close():
+    b = _bars(["2026-10-15 15:55", "2026-10-15 16:30", "2026-10-15 19:55"], [100.0, 101.0, 104.0])
+    assert trend.extended_move(b, ref_close=100.5) == ("After", 104.0, 100.5)
+    assert trend.extended_move(b) == ("After", 104.0, 100.0)       # falls back to last regular bar
+
+
+def test_extended_move_pre_market_and_regular_session():
+    pre = _bars(["2026-10-15 15:55", "2026-10-16 08:00"], [50.0, 47.5])
+    assert trend.extended_move(pre) == ("Pre", 47.5, 50.0)
+    reg = _bars(["2026-10-16 08:00", "2026-10-16 10:15"], [47.5, 48.0])
+    assert trend.extended_move(reg) is None                         # market open: nothing to show
+
+
+def test_is_us_listing():
+    assert trend.is_us_listing("AMZN") and trend.is_us_listing("PL")
+    assert not any(trend.is_us_listing(s) for s in ("RACE.MI", "BTC-USD", "^GSPC", "EURUSD=X"))

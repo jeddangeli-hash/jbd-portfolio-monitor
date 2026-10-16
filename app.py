@@ -436,6 +436,12 @@ def get_intraday(symbols: tuple[str, ...]) -> pd.DataFrame:
     return pr.fetch_intraday_bulk(list(symbols))
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def get_extended(symbols: tuple[str, ...]) -> pd.DataFrame:
+    """5-minute bars including pre/after-market, for the US listings only."""
+    return pr.fetch_intraday_bulk(list(symbols), period="5d", interval="5m", prepost=True)
+
+
 def _eur_prices(frame: pd.DataFrame, syms, sym_div: dict) -> pd.DataFrame:
     cols = [s for s in syms if s in frame.columns and sym_div.get(s)]
     return pd.DataFrame({s: frame[s] / sym_div[s] for s in cols}, index=frame.index)
@@ -454,6 +460,22 @@ def _daily_series(tx_c: pd.DataFrame, hist_eur: pd.DataFrame, live_mv: float):
         v = v.copy()
         v.iloc[-1] = live_mv
     return v, cf
+
+
+def _symbol_period_pnl(tx_s: pd.DataFrame, prices: pd.Series, qty: float,
+                       base, intraday: bool) -> float | None:
+    """One position's P&L over the window, in EUR (prices already in EUR)."""
+    p = prices.ffill().dropna()
+    if p.empty or base is None:
+        return None
+    if intraday:  # holdings as they are now
+        before = p[p.index <= base]
+        return qty * (float(p.iloc[-1]) - float(before.iloc[-1])) if len(before) else None
+    v, cf = mt.build_value_series(tx_s, p.to_frame(prices.name))
+    if v.empty:
+        return None
+    b = v.index[v.index <= base]
+    return _period_pnl(v, cf, b[-1]) if len(b) else _period_pnl(v, cf, None)
 
 
 def _period_pnl(values: pd.Series, cashflows: pd.Series, base) -> float:
@@ -553,6 +575,22 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
                 sym_prices.loc[today_ts, s] = q["price"] / sym_div[s]
         sym_prices = sym_prices.sort_index()
 
+    # ---- pre/after-market moves (US listings) -----------------------------
+    qty_now = pos_f.groupby("symbol")["qty"].sum()
+    us_syms = tuple(sorted(s for s in qty_now.index if trend.is_us_listing(s)))
+    ext_raw = get_extended(us_syms) if (us_syms and use_live) else pd.DataFrame()
+    ext: dict[str, tuple[str, float, float]] = {}
+    for s in us_syms:
+        if s in ext_raw.columns:
+            mv = trend.extended_move(ext_raw[s], (quotes_g.get(s) or {}).get("price"))
+            if mv:
+                ext[s] = mv
+    ext_impact = {s: float(qty_now[s]) * (px - ref) / sym_div[s]
+                  for s, (_, px, ref) in ext.items() if sym_div.get(s)}
+    # All US listings share one session clock, so one label names the columns.
+    ext_name = ("pre-market" if next(iter(ext.values()))[0] == "Pre" else "after-hours") if ext else None
+    ext_pct_col, ext_eur_col = f"Δ {ext_name} %", f"Impatto {ext_name} €"
+
     total = curves["total"]
     ret = float(total.iloc[-1]) if len(total) else 0.0
     pnl = pnl_by.get("total", 0.0)
@@ -566,7 +604,11 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
         ui.kpi("P&L nel periodo", ui.money(pnl), "in EUR", positive=pnl >= 0),
         ui.kpi("Valore attuale", ui.money(float(mv_cls.sum())),
                f"{pos_f['symbol'].nunique()} titoli"),
-    ] + ([ui.kpi("S&P 500", ui.pct(bench_ret * 100),
+    ] + ([ui.kpi(f"{ext_name} · stima",
+                 ui.money(sum(ext_impact.values())),
+                 f"impatto sul P&L · {len(ext_impact)} titoli USA",
+                 positive=sum(ext_impact.values()) >= 0)] if ext_impact else []) + (
+        [ui.kpi("S&P 500", ui.pct(bench_ret * 100),
                  f"portafoglio {'+' if ret >= bench_ret else '−'}"
                  f"{abs(ret - bench_ret) * 100:.2f} pt vs indice",
                  positive=ret >= bench_ret)] if bench_ret is not None else []) + ([ui.kpi(ASSET_LABELS[c], ui.pct(float(curves[c].iloc[-1]) * 100),
@@ -620,12 +662,16 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
         s, cls = r.symbol, r.asset_class
         q = quotes_g.get(s) or {}
         day = (q["price"] / q["prev_close"] - 1) * 100 if q.get("prev_close") else None
+        div = sym_div.get(s)
+        day_pnl = (float(r.qty) * (q["price"] - q["prev_close"]) / div
+                   if q.get("prev_close") and div else None)
         tot_pnl = float((r.unrealized_pnl_eur or 0) + (r.realized_pnl_eur or 0))
         cost = gross.get((s, cls))
         simple = tot_pnl / cost * 100 if cost else None
         prices_s = sym_prices[s] if s in sym_prices.columns else pd.Series(dtype=float)
-        if period == "Inizio" and not intraday:
+        if (period == "Inizio" or base_ts is None) and not intraday:
             per = simple
+            per_pnl = tot_pnl
             spark_base = prices_s.dropna().index.min() if len(prices_s.dropna()) else None
             first = tx_f[(tx_f["symbol"] == s)]["trade_date"].min()
             spark_base = pd.Timestamp(first) if pd.notna(first) else spark_base
@@ -633,16 +679,28 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
             pr_ = trend.symbol_period_return(prices_s, base_ts)
             per = pr_ * 100 if pr_ is not None else None
             spark_base = base_ts
+            per_pnl = _symbol_period_pnl(tx_f[(tx_f["symbol"] == s) & (tx_f["asset_class"] == cls)],
+                                         prices_s, float(r.qty), base_ts, intraday)
         rsi = mt.compute_rsi(hist_all[s], 14) if s in hist_all.columns else None
-        rows.append({
+        e = ext.get(s)
+        row = {
             "Titolo": s, "Classe": ASSET_LABELS[cls],
             "Andamento": trend.sparkline(prices_s, spark_base),
-            "Giorno %": day, "Periodo %": per, "Simple return %": simple,
-            "P&L totale €": tot_pnl, "Valore €": float(r.market_value_eur), "RSI": rsi,
-        })
+            "Giorno %": day, "P&L giorno €": day_pnl,
+            "Periodo %": per, "P&L periodo €": per_pnl,
+            "Simple return %": simple, "P&L totale €": tot_pnl,
+            "Valore €": float(r.market_value_eur), "RSI": rsi,
+        }
+        if ext:  # extra columns only while a US pre/after session has prices
+            row[ext_pct_col] = (e[1] / e[2] - 1) * 100 if e else None
+            row[ext_eur_col] = ext_impact.get(s) if e else None
+        rows.append(row)
     if not rows:
         return
     table = pd.DataFrame(rows).sort_values("Valore €", ascending=False)
+    # None → NaN so the Styler's na_rep shows "—" instead of the text "None".
+    num_cols = [c for c in table.columns if c not in ("Titolo", "Classe", "Andamento")]
+    table[num_cols] = table[num_cols].astype(float)
 
     def _tone(v):
         if v is None or pd.isna(v):
@@ -654,13 +712,32 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
             return ""
         return f"color: {ui.NEG}" if v >= 70 else f"color: {ui.POS}" if v <= 30 else ""
 
-    styled = (table.style
-              .map(_tone, subset=["Giorno %", "Periodo %", "Simple return %", "P&L totale €"])
-              .map(_rsi_tone, subset=["RSI"])
-              .format({"Giorno %": "{:+.2f}%", "Periodo %": "{:+.2f}%",
-                       "Simple return %": "{:+.2f}%", "P&L totale €": ui.money,
-                       "Valore €": ui.money, "RSI": "{:.0f}"}, na_rep="—"))
+    signed = ["Giorno %", "P&L giorno €", "Periodo %", "P&L periodo €", "Simple return %",
+              "P&L totale €"] + ([ext_pct_col, ext_eur_col] if ext else [])
+    pct = "{:+.2f}%".format
+    fmt = {"Giorno %": pct, "P&L giorno €": ui.money, "Periodo %": pct,
+           "P&L periodo €": ui.money, "Simple return %": pct, "P&L totale €": ui.money,
+           "Valore €": ui.money, "RSI": "{:.0f}".format}
+    if ext:
+        fmt.update({ext_pct_col: pct, ext_eur_col: ui.money})
+    # Streamlit draws empty cells as "None" whatever the Styler says, so columns
+    # with gaps are turned into text here ("—" for a gap); colours are computed
+    # from the numbers either way.
+    disp = table.copy()
+    as_text = [c for c in fmt if disp[c].isna().any()]
+    for c in as_text:
+        disp[c] = ["—" if pd.isna(v) else fmt[c](v) for v in table[c]]
+    css = pd.DataFrame("", index=table.index, columns=table.columns)
+    for c in signed:
+        css[c] = table[c].map(_tone)
+    css["RSI"] = table["RSI"].map(_rsi_tone)
+    styled = (disp.style.apply(lambda _: css, axis=None)
+              .format({c: f for c, f in fmt.items() if c not in as_text}))
     st.markdown(f"**Titoli · {trend.PERIOD_LABELS[period]}**")
+    if ext_impact:
+        movers = sorted(ext_impact.items(), key=lambda kv: abs(kv[1]), reverse=True)[:3]
+        st.caption("Fuori orario si muovono di più: " + " · ".join(
+            f"**{s}** {(ext[s][1] / ext[s][2] - 1) * 100:+.1f}% ({ui.money(v)})" for s, v in movers))
     st.dataframe(
         styled, hide_index=True, use_container_width=True,
         height=min(38 + 35 * len(table), 520),
@@ -673,6 +750,13 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
             "Simple return %": st.column_config.Column(
                 help="P&L totale (realizzato + non realizzato) ÷ costo di tutti gli acquisti"),
             "RSI": st.column_config.Column(help="RSI 14 giorni: >70 ipercomprato, <30 ipervenduto"),
+            "P&L giorno €": st.column_config.Column(help="Quantità × (prezzo attuale − chiusura precedente)"),
+            "P&L periodo €": st.column_config.Column(
+                help="P&L della posizione nel periodo; acquisti e vendite nel periodo contano come cassa"),
+            ext_pct_col: st.column_config.Column(
+                help="Ultimo prezzo fuori orario vs ultima chiusura ufficiale (solo titoli USA)"),
+            ext_eur_col: st.column_config.Column(
+                help="Quantità × variazione fuori orario: quanto cambierebbe il P&L a quel prezzo"),
         },
     )
     st.caption("Importi in EUR al cambio di oggi. Il BTP non ha storico prezzi ed è escluso.")
