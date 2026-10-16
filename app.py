@@ -178,7 +178,8 @@ with st.sidebar:
                          help="Valuta di Generale e Andamento (le viste per classe restano in valuta originale)")
     use_live = st.toggle("Fetch live prices", value=True)
     benchmark = st.selectbox("Benchmark", ["SPY", "QQQ", "VTI", "ACWI", "URTH", "None"], index=0)
-    period = st.selectbox("History period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
+    period = st.selectbox("History period", ["Dall'inizio", "1mo", "3mo", "6mo", "1y", "2y", "5y"],
+                          index=0, help="Dall'inizio = dal primo trade della classe")
     rf_rate = st.slider("Risk-free rate (Sharpe)", 0.0, 0.10, 0.04, 0.005)
 
     # ----- Bond / BTP (manual, JSON-persisted) — loaded only on demand --------
@@ -1506,6 +1507,12 @@ ui.kpi_grid([
 #   - the value of closed positions during the time they were held
 #   - the cash inflow/outflow when they were sold
 # Otherwise the "Total P&L over time" chart misses every closed position's realized P&L.
+# "Dall'inizio": the shortest Yahoo period that reaches back to this class's first
+# trade, so the charts start on that day (trim_to_first_holding drops the rest).
+if period == "Dall'inizio":
+    _age_days = (pd.Timestamp(date.today()) - tx["trade_date"].min()).days
+    period = next((p for p, d in (("1y", 360), ("2y", 725), ("5y", 1820), ("10y", 3645))
+                   if _age_days <= d), "max")
 hist = get_history(tuple(all_symbols_ever), period) if pr.HAS_YF else pd.DataFrame()
 twr_growth = pd.Series(dtype=float)
 bench_growth = pd.Series(dtype=float)
