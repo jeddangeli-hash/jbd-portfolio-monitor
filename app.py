@@ -174,6 +174,8 @@ with st.sidebar:
         st.caption("ℹ️ Salvataggio solo locale. Imposta `github_token` + `github_repo` "
                    "(repo **privato**) nei secrets per conservarli tra dispositivi.")
     ui.side_section("Impostazioni")
+    st.segmented_control("Valuta", ["EUR", "USD"], default="EUR", key="base_ccy",
+                         help="Valuta di Generale e Andamento (le viste per classe restano in valuta originale)")
     use_live = st.toggle("Fetch live prices", value=True)
     benchmark = st.selectbox("Benchmark", ["SPY", "QQQ", "VTI", "ACWI", "URTH", "None"], index=0)
     period = st.selectbox("History period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
@@ -410,7 +412,7 @@ def _stagger_labels(points: list[tuple[float, str]], y_span: float,
     return out
 
 
-def _bond_position_row(bond) -> dict:
+def _bond_position_row(bond, eur_div: float = 1.0) -> dict:
     """A static position row for the bond, shaped like an enriched all_pos row.
 
     qty·current_price == market_value (price expressed per unit nominal), EUR
@@ -425,9 +427,10 @@ def _bond_position_row(bond) -> dict:
         "snapshot_price": float("nan"), "asset_class": "bond",
         "current_price": bond.price_market, "market_value": bond.market_value,
         "unrealized_pnl": bond.pnl, "total_pnl": bond.pnl, "return_pct": bond.return_pct,
-        "currency": "EUR", "divisor": 1.0,
-        "market_value_eur": bond.market_value, "invested_eur": bond.load_value,
-        "unrealized_pnl_eur": bond.pnl, "realized_pnl_eur": 0.0,
+        "currency": "EUR", "divisor": eur_div,
+        "market_value_eur": bond.market_value / eur_div,
+        "invested_eur": bond.load_value / eur_div,
+        "unrealized_pnl_eur": bond.pnl / eur_div, "realized_pnl_eur": 0.0,
     }
 
 
@@ -486,6 +489,7 @@ def _period_pnl(values: pd.Series, cashflows: pd.Series, base) -> float:
 def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
                  quotes_g: dict, sym_div: dict, conv_syms: list, csv_classes: list) -> None:
     """Home 'Andamento': period simple return, per-class split and per-symbol table."""
+    C, BASE = ui.cur_sym(), ui.cur_code()
     st.subheader("Andamento")
     f1, f2 = st.columns([3, 2])
     with f1:
@@ -589,7 +593,7 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
                   for s, (_, px, ref) in ext.items() if sym_div.get(s)}
     # All US listings share one session clock, so one label names the columns.
     ext_name = ("pre-market" if next(iter(ext.values()))[0] == "Pre" else "after-hours") if ext else None
-    ext_pct_col, ext_eur_col = f"Δ {ext_name} %", f"Impatto {ext_name} €"
+    ext_pct_col, ext_eur_col = f"Δ {ext_name} %", f"Impatto {ext_name} {C}"
 
     total = curves["total"]
     ret = float(total.iloc[-1]) if len(total) else 0.0
@@ -601,7 +605,7 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
     ui.kpi_grid([
         ui.kpi(f"Rendimento · {trend.PERIOD_LABELS[period]}", ui.pct(ret * 100),
                "simple return", positive=ret >= 0, hero=True),
-        ui.kpi("P&L nel periodo", ui.money(pnl), "in EUR", positive=pnl >= 0),
+        ui.kpi("P&L nel periodo", ui.money(pnl), f"in {BASE}", positive=pnl >= 0),
         ui.kpi("Valore attuale", ui.money(float(mv_cls.sum())),
                f"{pos_f['symbol'].nunique()} titoli"),
     ] + ([ui.kpi(f"{ext_name} · stima",
@@ -686,10 +690,10 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
         row = {
             "Titolo": s, "Classe": ASSET_LABELS[cls],
             "Andamento": trend.sparkline(prices_s, spark_base),
-            "Giorno %": day, "P&L giorno €": day_pnl,
-            "Periodo %": per, "P&L periodo €": per_pnl,
-            "Simple return %": simple, "P&L totale €": tot_pnl,
-            "Valore €": float(r.market_value_eur), "RSI": rsi,
+            "Giorno %": day, f"P&L giorno {C}": day_pnl,
+            "Periodo %": per, f"P&L periodo {C}": per_pnl,
+            "Simple return %": simple, f"P&L totale {C}": tot_pnl,
+            f"Valore {C}": float(r.market_value_eur), "RSI": rsi,
         }
         if ext:  # extra columns only while a US pre/after session has prices
             row[ext_pct_col] = (e[1] / e[2] - 1) * 100 if e else None
@@ -697,7 +701,7 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
         rows.append(row)
     if not rows:
         return
-    table = pd.DataFrame(rows).sort_values("Valore €", ascending=False)
+    table = pd.DataFrame(rows).sort_values(f"Valore {C}", ascending=False)
     # None → NaN so the Styler's na_rep shows "—" instead of the text "None".
     num_cols = [c for c in table.columns if c not in ("Titolo", "Classe", "Andamento")]
     table[num_cols] = table[num_cols].astype(float)
@@ -712,12 +716,12 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
             return ""
         return f"color: {ui.NEG}" if v >= 70 else f"color: {ui.POS}" if v <= 30 else ""
 
-    signed = ["Giorno %", "P&L giorno €", "Periodo %", "P&L periodo €", "Simple return %",
-              "P&L totale €"] + ([ext_pct_col, ext_eur_col] if ext else [])
+    signed = ["Giorno %", f"P&L giorno {C}", "Periodo %", f"P&L periodo {C}", "Simple return %",
+              f"P&L totale {C}"] + ([ext_pct_col, ext_eur_col] if ext else [])
     pct = "{:+.2f}%".format
-    fmt = {"Giorno %": pct, "P&L giorno €": ui.money, "Periodo %": pct,
-           "P&L periodo €": ui.money, "Simple return %": pct, "P&L totale €": ui.money,
-           "Valore €": ui.money, "RSI": "{:.0f}".format}
+    fmt = {"Giorno %": pct, f"P&L giorno {C}": ui.money, "Periodo %": pct,
+           f"P&L periodo {C}": ui.money, "Simple return %": pct, f"P&L totale {C}": ui.money,
+           f"Valore {C}": ui.money, "RSI": "{:.0f}".format}
     if ext:
         fmt.update({ext_pct_col: pct, ext_eur_col: ui.money})
     # Streamlit draws empty cells as "None" whatever the Styler says, so columns
@@ -750,8 +754,8 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
             "Simple return %": st.column_config.Column(
                 help="P&L totale (realizzato + non realizzato) ÷ costo di tutti gli acquisti"),
             "RSI": st.column_config.Column(help="RSI 14 giorni: >70 ipercomprato, <30 ipervenduto"),
-            "P&L giorno €": st.column_config.Column(help="Quantità × (prezzo attuale − chiusura precedente)"),
-            "P&L periodo €": st.column_config.Column(
+            f"P&L giorno {C}": st.column_config.Column(help="Quantità × (prezzo attuale − chiusura precedente)"),
+            f"P&L periodo {C}": st.column_config.Column(
                 help="P&L della posizione nel periodo; acquisti e vendite nel periodo contano come cassa"),
             ext_pct_col: st.column_config.Column(
                 help="Ultimo prezzo fuori orario vs ultima chiusura ufficiale (solo titoli USA)"),
@@ -759,7 +763,7 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
                 help="Quantità × variazione fuori orario: quanto cambierebbe il P&L a quel prezzo"),
         },
     )
-    st.caption("Importi in EUR al cambio di oggi. Il BTP non ha storico prezzi ed è escluso.")
+    st.caption(f"Importi in {BASE} al cambio di oggi. Il BTP non ha storico prezzi ed è escluso.")
 
 
 def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
@@ -775,6 +779,9 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     approximation).
     """
     today_ = date.today()
+    # Base currency of every converted figure below. Columns keep their historic
+    # *_eur names; they hold amounts in BASE.
+    C, BASE = ui.cur_sym(), ui.cur_code()
 
     # 0) Asset-class filter for the aggregate. Deselecting a class removes it from
     #    EVERYTHING below (KPIs, allocation, value-by-class, holdings, Performance).
@@ -820,13 +827,14 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
 
     # 3) Resolve an EUR divisor per distinct currency present.
     #    EUR{CCY}=X = CCY per 1 EUR  ⇒  value_eur = value_native / rate. EUR → 1.0.
-    currencies = sorted({c for c in all_pos["currency"].dropna().unique()})
+    currencies = sorted({c for c in all_pos["currency"].dropna().unique()}
+                        | ({"EUR"} if bond is not None and "bond" in classes else set()))
     divisor: dict[str, float] = {}
     for ccy in currencies:
-        if ccy == "EUR":
+        if ccy == BASE:
             divisor[ccy] = 1.0
             continue
-        r = get_fx_rate(f"EUR{ccy}=X") if use_live else None
+        r = get_fx_rate(f"{BASE}{ccy}=X") if use_live else None
         if r:
             divisor[ccy] = r
     all_pos["divisor"] = all_pos["currency"].map(divisor)
@@ -838,9 +846,10 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     # Inject the bond as a static EUR position (option b): it lands in the totals,
     # allocation, holdings and filter, but carries no transactions — so it is absent
     # from tx_sel/tx_eur and thus excluded from XIRR and the Performance series.
-    bond_in = bond is not None and "bond" in classes
+    bond_div = divisor.get("EUR")  # EUR → base; 1.0 when the base is EUR
+    bond_in = bond is not None and "bond" in classes and bond_div is not None
     if bond_in:
-        all_pos = pd.concat([all_pos, pd.DataFrame([_bond_position_row(bond)])],
+        all_pos = pd.concat([all_pos, pd.DataFrame([_bond_position_row(bond, bond_div)])],
                             ignore_index=True)
 
     convertible = all_pos["divisor"].notna()
@@ -854,7 +863,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     total_pnl_eur = total_unreal_eur + total_real_eur
     # The bond is excluded from XIRR and the Performance time-series (it has no tx
     # history); those use the CSV-only market value for the terminal/pin.
-    bond_mv_eur = bond.market_value if bond_in else 0.0
+    bond_mv_eur = bond.market_value / bond_div if bond_in else 0.0
     csv_mv_eur = total_mv_eur - bond_mv_eur
 
     # EUR cashflow basis — single source of truth for "simple return on net cash",
@@ -871,7 +880,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     deployed_eur = float((buy_eur["qty"] * buy_eur["price"]).sum())
     returned_eur = float((sell_eur["qty"] * sell_eur["price"]).sum())
     if bond_in:
-        deployed_eur += bond.load_value  # bond = single buy at load value, no sells
+        deployed_eur += bond.load_value / bond_div  # bond = single buy at load value, no sells
     net_cash_in_eur = deployed_eur - returned_eur
     simple_on_net = (total_pnl_eur / net_cash_in_eur * 100.0) if net_cash_in_eur > 0 else 0.0
 
@@ -891,18 +900,18 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     ts_ = datetime.now().strftime("%Y-%m-%d %H:%M")
     label_list = ", ".join(ASSET_LABELS[c] for c in classes)
     st.caption(f"As of {ts_} · aggregate of **{label_list}** · "
-               f"{int(open_mask.sum())} open positions · totals in **EUR** "
+               f"{int(open_mask.sum())} open positions · totals in **{BASE}** "
                f"(today's FX applied to realized/historical too)")
 
     if not use_live:
-        st.warning("Live prices are off — EUR conversion needs live quotes/FX. "
-                   "Enable “Fetch live prices” in the sidebar to aggregate in EUR.")
+        st.warning(f"Live prices are off — {BASE} conversion needs live quotes/FX. "
+                   f"Enable “Fetch live prices” in the sidebar to aggregate in {BASE}.")
     excluded = open_pos[~convertible[open_mask].values]
     if not excluded.empty:
         items = "; ".join(
             f"{row.symbol} ({row.currency if isinstance(row.currency, str) else 'unknown'})"
             for row in excluded.itertuples())
-        st.warning(f"Excluded from EUR totals — no rate for their currency: {items}. "
+        st.warning(f"Excluded from {BASE} totals — no rate for their currency: {items}. "
                    "Native values still appear in the holdings table below.")
 
     # ---- KPIs (EUR primary) ------------------------------------------------
@@ -921,8 +930,8 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
                "money-weighted, annuo",
                positive=(agg_xirr >= 0) if agg_xirr is not None else None),
     ])
-    fx_txt = " · ".join(f"EUR{c}={divisor[c]:.4f}" for c in currencies
-                        if c != "EUR" and c in divisor)
+    fx_txt = " · ".join(f"{BASE}{c}={divisor[c]:.4f}" for c in currencies
+                        if c != BASE and c in divisor)
     if fx_txt:
         st.caption(f"💶 FX today: {fx_txt}")
 
@@ -935,7 +944,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     # ---- allocation (EUR) + per-class native breakdown --------------------
     left, right = st.columns(2)
     with left:
-        st.subheader("Allocation by asset class (EUR)")
+        st.subheader(f"Allocation by asset class ({BASE})")
         alloc = (oc.groupby("asset_class")["market_value_eur"].sum()
                  .reindex(classes).fillna(0.0).reset_index())
         alloc["label"] = alloc["asset_class"].map(ASSET_LABELS)
@@ -947,7 +956,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
         else:
             st.info("No convertible open positions to allocate.")
     with right:
-        st.subheader("Value by class — EUR vs native")
+        st.subheader(f"Value by class — {BASE} vs native")
         rows = []
         for cls in classes:
             eur_v = float(oc.loc[oc["asset_class"] == cls, "market_value_eur"].sum())
@@ -959,7 +968,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
             # same simple-return formula as the headline KPI. The bond has no tx, so
             # its net cash is its load value (single buy, no sells).
             if cls == "bond" and bond_in:
-                cls_net = bond.load_value
+                cls_net = bond.load_value / bond_div
             else:
                 cls_tx = tx_eur[tx_eur["asset_class"] == cls]
                 cls_buy = cls_tx[cls_tx["side"] == "BUY"]
@@ -970,12 +979,12 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
             cls_real = float(all_pos.loc[convertible & (all_pos["asset_class"] == cls),
                                          "realized_pnl_eur"].sum())
             cls_ret = ((cls_unreal + cls_real) / cls_net * 100.0) if cls_net > 0 else None
-            rows.append({"Class": ASSET_LABELS[cls], "Market value (€)": eur_v,
+            rows.append({"Class": ASSET_LABELS[cls], f"Market value ({C})": eur_v,
                          "% return": cls_ret, "Native": nat_str})
         st.dataframe(
             pd.DataFrame(rows), hide_index=True, use_container_width=True,
             column_config={
-                "Market value (€)": st.column_config.NumberColumn(format="€%.0f"),
+                f"Market value ({C})": st.column_config.NumberColumn(format=f"{C}%.0f"),
                 "% return": st.column_config.NumberColumn(format="%.2f%%"),
             },
         )
@@ -999,7 +1008,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
                   .assign(_c=lambda d: d["qty"] * d["price"])
                   .groupby(["symbol", "asset_class"])["_c"].sum())
     if bond_in:  # bond gross cost = its load value (single buy, no tx)
-        gross_cost.loc[(bond.isin, "bond")] = bond.load_value
+        gross_cost.loc[(bond.isin, "bond")] = bond.load_value / bond_div
     table["gross_cost_eur"] = [gross_cost.get((s, a))
                                for s, a in zip(table["symbol"], table["asset_class"])]
     table["return_pct"] = table["total_pnl_eur"] / table["gross_cost_eur"] * 100.0
@@ -1016,13 +1025,13 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
             "qty": st.column_config.NumberColumn("Qty", format="%.4f"),
             "current_price": st.column_config.NumberColumn("Price (native)", format="%.2f"),
             "market_value": st.column_config.NumberColumn("MV (native)", format="%.0f"),
-            "market_value_eur": st.column_config.NumberColumn("MV (€)", format="€%.0f"),
-            "unrealized_pnl_eur": st.column_config.NumberColumn("Unrealized (€)", format="€%.0f"),
-            "realized_pnl_eur": st.column_config.NumberColumn("Realized (€)", format="€%.0f"),
-            "total_pnl_eur": st.column_config.NumberColumn("Total P&L (€)", format="€%.0f"),
+            "market_value_eur": st.column_config.NumberColumn(f"MV ({C})", format=f"{C}%.0f"),
+            "unrealized_pnl_eur": st.column_config.NumberColumn(f"Unrealized ({C})", format=f"{C}%.0f"),
+            "realized_pnl_eur": st.column_config.NumberColumn(f"Realized ({C})", format=f"{C}%.0f"),
+            "total_pnl_eur": st.column_config.NumberColumn(f"Total P&L ({C})", format=f"{C}%.0f"),
             "return_pct": st.column_config.NumberColumn(
                 "Return %", format="%.2f%%",
-                help="Total P&L ÷ gross buy cost (Σ qty·price of all buys), in EUR."),
+                help=f"Total P&L ÷ gross buy cost (Σ qty·price of all buys), in {BASE}."),
         },
     )
 
@@ -1031,12 +1040,12 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     # computed on the selected classes (tx_sel/tx_eur) and converted to EUR.
     # ===================================================================
     st.divider()
-    st.header("Performance (aggregate · EUR)")
+    st.header(f"Performance (aggregate · {BASE})")
     st.caption("Same methodology as the per-class Performance tab, aggregated across "
-               "all classes. Historical prices and cashflows are converted to EUR at "
+               f"all classes. Historical prices and cashflows are converted to {BASE} at "
                "**today's** FX rate (an accepted approximation for past values).")
     if bond_in:
-        st.caption(f"ℹ️ The bond (€{bond_mv_eur:,.0f}) is **excluded** from these time-series "
+        st.caption(f"ℹ️ The bond ({C}{bond_mv_eur:,.0f}) is **excluded** from these time-series "
                    "(it has no price history) — these curves reflect the CSV classes only, so "
                    "they won't match the bond-inclusive KPIs above.")
 
@@ -1092,11 +1101,11 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
                         "Compare to the benchmark below.")
         rd2.metric("XIRR (money-weighted, ann.)",
                    f"{agg_xirr*100:.2f}%" if agg_xirr else "—",
-                   help="Annualized return on actual EUR cashflows, time-discounted.")
+                   help=f"Annualized return on actual {BASE} cashflows, time-discounted.")
         rd3.metric("Simple return on net cash", f"{simple_on_net:+.2f}%",
-                   help="Total P&L ÷ net cash invested (deployed − returned), in EUR.")
+                   help=f"Total P&L ÷ net cash invested (deployed − returned), in {BASE}.")
         rd4.metric("Simple return on deployed", f"{simple_on_deployed:+.2f}%",
-                   help="Total P&L ÷ gross capital deployed (all buys), in EUR.")
+                   help=f"Total P&L ÷ gross capital deployed (all buys), in {BASE}.")
 
         st.markdown("---")
 
@@ -1169,9 +1178,9 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
         # Equity curve (€)
-        st.subheader("Equity curve (€)")
+        st.subheader(f"Equity curve ({C})")
         st.caption("Blue = market value of holdings. Amber = cumulative net cash invested "
-                   "(buys − sells). Gap = mark-to-market total P&L. All in EUR.")
+                   f"(buys − sells). Gap = mark-to-market total P&L. All in {BASE}.")
         cum_capital_curve = cf_series_g.cumsum()
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(
@@ -1179,24 +1188,24 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
             line=dict(color="#7c8eff", width=2),
             fill="tozeroy", fillcolor="rgba(124,142,255,0.08)",
             name="Market value",
-            hovertemplate="%{x|%Y-%m-%d}<br>€%{y:,.0f}<extra>Market value</extra>",
+            hovertemplate="%{x|%Y-%m-%d}<br>" + C + "%{y:,.0f}<extra>Market value</extra>",
         ))
         fig2.add_trace(go.Scatter(
             x=cum_capital_curve.index, y=cum_capital_curve.values, mode="lines",
             line=dict(color="#f4b942", width=2, dash="dot"),
             name="Net capital invested",
-            hovertemplate="%{x|%Y-%m-%d}<br>€%{y:,.0f}<extra>Net capital</extra>",
+            hovertemplate="%{x|%Y-%m-%d}<br>" + C + "%{y:,.0f}<extra>Net capital</extra>",
         ))
         fig2.update_layout(height=360, margin=dict(t=10, b=10, l=10, r=10),
                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                           yaxis_title="€", xaxis=dict(showgrid=False),
+                           yaxis_title=C, xaxis=dict(showgrid=False),
                            yaxis=dict(gridcolor="#222"),
                            legend=dict(orientation="h", yanchor="bottom", y=1.02))
         st.plotly_chart(fig2, use_container_width=True)
 
         # Total P&L over time (€) — aggregate plus one line per asset class.
-        st.subheader("Total P&L over time (€)")
-        st.caption("Mark-to-market: portfolio value minus net cash invested, in EUR. "
+        st.subheader(f"Total P&L over time ({C})")
+        st.caption(f"Mark-to-market: portfolio value minus net cash invested, in {BASE}. "
                    "The grey line is the aggregate; coloured lines split it by asset "
                    "class and always sum back to it. Add or remove classes with the "
                    "**asset-class filter at the top of this page**.")
@@ -1254,13 +1263,13 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
                     x=s_cls.index, y=s_cls.values, mode="lines",
                     line=dict(color=CLASS_COLORS[cls], width=2),
                     name=ASSET_LABELS[cls],
-                    hovertemplate="€%{y:,.0f}<extra>" + ASSET_LABELS[cls] + "</extra>",
+                    hovertemplate=C + "%{y:,.0f}<extra>" + ASSET_LABELS[cls] + "</extra>",
                 ))
         fig3.add_trace(go.Scatter(
             x=total_pnl_curve.index, y=total_pnl_curve.values,
             mode="lines", line=dict(color=INK_NEUTRAL, width=2.4),
             name="Total",
-            hovertemplate="€%{y:,.0f}<extra>Total</extra>",
+            hovertemplate=C + "%{y:,.0f}<extra>Total</extra>",
         ))
         fig3.add_hline(y=0, line_dash="dash", line_color="#888")
         peak_idx = total_pnl_curve.idxmax()
@@ -1272,9 +1281,9 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
             marker=dict(size=10, color=["#22c55e", "#f43f5e"],
                         line=dict(color="#0e1117", width=2)),
             text=["" if peak_idx == total_pnl_curve.index[-1]
-                  else f"Peak €{total_pnl_curve.loc[peak_idx]:,.0f}",
+                  else f"Peak {C}{total_pnl_curve.loc[peak_idx]:,.0f}",
                   "" if trough_idx == total_pnl_curve.index[-1]
-                  else f"Trough €{total_pnl_curve.loc[trough_idx]:,.0f}"],
+                  else f"Trough {C}{total_pnl_curve.loc[trough_idx]:,.0f}"],
             textposition=["top center", "bottom center"],
             textfont=dict(color=INK_NEUTRAL),
             showlegend=False, hoverinfo="skip",
@@ -1296,17 +1305,17 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
                 )
         fig3.update_layout(height=430, margin=dict(t=20, b=10, l=10, r=78),
                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                           yaxis_title="€ P&L", xaxis=dict(showgrid=False),
+                           yaxis_title=f"{C} P&L", xaxis=dict(showgrid=False),
                            yaxis=dict(gridcolor=GRID_NEUTRAL, zerolinecolor="#888"),
                            hovermode="x unified",
                            legend=dict(orientation="h", yanchor="bottom", y=1.02))
         st.plotly_chart(fig3, use_container_width=True)
 
         pk1, pk2, pk3, pk4 = st.columns(4)
-        pk1.metric("Current P&L", f"€{total_pnl_curve.iloc[-1]:,.0f}")
-        pk2.metric("Peak P&L", f"€{total_pnl_curve.loc[peak_idx]:,.0f}",
+        pk1.metric("Current P&L", f"{C}{total_pnl_curve.iloc[-1]:,.0f}")
+        pk2.metric("Peak P&L", f"{C}{total_pnl_curve.loc[peak_idx]:,.0f}",
                    help=f"on {peak_idx.date()}")
-        pk3.metric("Trough P&L", f"€{total_pnl_curve.loc[trough_idx]:,.0f}",
+        pk3.metric("Trough P&L", f"{C}{total_pnl_curve.loc[trough_idx]:,.0f}",
                    help=f"on {trough_idx.date()}")
         pk4.metric("Days winning",
                    f"{int((total_pnl_curve >= 0).sum())} / {len(total_pnl_curve)}")
@@ -1320,17 +1329,17 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
                     continue
                 rows_p.append({
                     "Class": ASSET_LABELS[cls],
-                    "Current (€)": float(sv.iloc[-1]),
-                    "Peak (€)": float(sv.max()),
-                    "Trough (€)": float(sv.min()),
+                    f"Current ({C})": float(sv.iloc[-1]),
+                    f"Peak ({C})": float(sv.max()),
+                    f"Trough ({C})": float(sv.min()),
                     "Days winning": f"{int((sv >= 0).sum())} / {len(sv)}",
                 })
             st.dataframe(
                 pd.DataFrame(rows_p), hide_index=True, use_container_width=True,
                 column_config={
-                    "Current (€)": st.column_config.NumberColumn(format="€%.0f"),
-                    "Peak (€)": st.column_config.NumberColumn(format="€%.0f"),
-                    "Trough (€)": st.column_config.NumberColumn(format="€%.0f"),
+                    f"Current ({C})": st.column_config.NumberColumn(format=f"{C}%.0f"),
+                    f"Peak ({C})": st.column_config.NumberColumn(format=f"{C}%.0f"),
+                    f"Trough ({C})": st.column_config.NumberColumn(format=f"{C}%.0f"),
                 },
             )
             st.caption("Class lines sum to the aggregate. The bond is absent — it has "

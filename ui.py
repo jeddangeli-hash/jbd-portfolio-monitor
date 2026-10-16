@@ -165,8 +165,25 @@ def inject_css() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
 
 
-def money(v: float | None, sym: str = "€", decimals: int = 0) -> str:
-    """'€12,345' / '−€12,345' — sign before the currency, true minus sign."""
+CURRENCY_SYMBOLS = {"EUR": "€", "USD": "$"}
+
+
+def cur_code() -> str:
+    """Base currency of the aggregate views, chosen per viewer in the sidebar."""
+    return st.session_state.get("base_ccy") or "EUR"
+
+
+def cur_sym() -> str:
+    return CURRENCY_SYMBOLS[cur_code()]
+
+
+def money(v: float | None, sym: str | None = None, decimals: int = 0) -> str:
+    """'€12,345' / '−€12,345' — sign before the currency, true minus sign.
+
+    Without `sym` the viewer's base currency is used.
+    """
+    if sym is None:
+        sym = cur_sym()
     if v is None:
         return "—"
     sign = "−" if v < 0 else ""
