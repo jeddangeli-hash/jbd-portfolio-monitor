@@ -182,3 +182,43 @@ def extended_move(bars: pd.Series, ref_close: float | None = None):
             return None
         ref_close = float(regular.iloc[-1])
     return label, float(p.iloc[-1]), float(ref_close)
+
+
+_WEEKDAYS_IT = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+
+
+def earnings_soon(dates: dict, now: pd.Timestamp) -> list[dict]:
+    """Earnings releases today or on the next business day (New York calendar).
+
+    `dates` maps symbol → [(UTC timestamp, has_time)]. Each hit carries a day
+    label (Oggi / Domani / weekday) and the session: Pre-market before 09:30,
+    After-market from 16:00, In seduta in between, "Orario n.d." when Yahoo only
+    gives the date.
+    """
+    today = now.tz_convert(US_TZ).date()
+    nxt = (pd.Timestamp(today) + pd.offsets.BDay(1)).date()
+    out = []
+    for sym, items in dates.items():
+        for ts, timed in items:
+            local = ts.tz_convert(US_TZ)
+            d = local.date()
+            if d not in (today, nxt):
+                continue
+            if d == today:
+                day = "Oggi"
+            elif (d - today).days == 1:
+                day = "Domani"
+            else:
+                day = _WEEKDAYS_IT[d.weekday()]
+            mins = local.hour * 60 + local.minute
+            if not timed:
+                session = "Orario n.d."
+            elif mins < _REG_OPEN:
+                session = "Pre-market"
+            elif mins >= _REG_CLOSE:
+                session = "After-market"
+            else:
+                session = "In seduta"
+            out.append({"symbol": sym, "day": day, "date": d, "session": session, "ts": ts})
+    order = {"Pre-market": 0, "In seduta": 1, "After-market": 2, "Orario n.d.": 3}
+    return sorted(out, key=lambda e: (e["date"], order[e["session"]], e["symbol"]))

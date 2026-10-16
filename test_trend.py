@@ -103,3 +103,24 @@ def test_extended_move_pre_market_and_regular_session():
 def test_is_us_listing():
     assert trend.is_us_listing("AMZN") and trend.is_us_listing("PL")
     assert not any(trend.is_us_listing(s) for s in ("RACE.MI", "BTC-USD", "^GSPC", "EURUSD=X"))
+
+
+def _ny(s):
+    return pd.Timestamp(s).tz_localize(trend.US_TZ).tz_convert("UTC")
+
+
+def test_earnings_soon_today_and_next_business_day():
+    now = _ny("2026-10-16 07:00")                      # Friday, before the open
+    dates = {
+        "AMZN": [(_ny("2026-10-16 16:05"), True)],     # today after the close
+        "PFE": [(_ny("2026-10-19 06:45"), True)],      # Monday before the open
+        "MELI": [(_ny("2026-10-16 00:00"), False)],    # date only
+        "OLD": [(_ny("2026-07-30 16:05"), True)],      # past quarter
+        "LATE": [(_ny("2026-10-20 16:05"), True)],     # beyond the next business day
+    }
+    hits = trend.earnings_soon(dates, now)
+    assert [(h["symbol"], h["day"], h["session"]) for h in hits] == [
+        ("AMZN", "Oggi", "After-market"),
+        ("MELI", "Oggi", "Orario n.d."),
+        ("PFE", "Lunedì", "Pre-market"),
+    ]

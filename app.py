@@ -439,6 +439,11 @@ def get_intraday(symbols: tuple[str, ...]) -> pd.DataFrame:
     return pr.fetch_intraday_bulk(list(symbols))
 
 
+@st.cache_data(ttl=6 * 3600, show_spinner="Calendario trimestrali…")
+def get_earnings(symbols: tuple[str, ...]) -> dict:
+    return pr.fetch_earnings_bulk(list(symbols))
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def get_extended(symbols: tuple[str, ...]) -> pd.DataFrame:
     """5-minute bars including pre/after-market, for the US listings only."""
@@ -619,6 +624,14 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
                  ui.money(pnl_by.get(c, 0.0)) + " nel periodo",
                  positive=float(curves[c].iloc[-1]) >= 0)
           for c in picked if c in curves and len(curves[c])] if len(picked) > 1 else []))
+
+    # ---- earnings today / next business day (stocks held) -----------------
+    if "stocks" in picked and use_live:
+        stock_pos = pos_f[pos_f["asset_class"] == "stocks"]
+        stock_syms = tuple(sorted(stock_pos["symbol"].unique()))
+        if stock_syms:
+            soon = trend.earnings_soon(get_earnings(stock_syms), pd.Timestamp.now(tz="UTC"))
+            ui.earnings_strip(soon, stock_pos.groupby("symbol")["market_value_eur"].sum().to_dict())
 
     # ---- chart ------------------------------------------------------------
     def _x(s: pd.Series):
@@ -1405,6 +1418,16 @@ quotes = get_quotes(symbols) if use_live else {}
 price_map = {s: q["price"] for s, q in quotes.items()}
 prev_map = {s: q["prev_close"] for s, q in quotes.items()}
 
+# Display currency of this class view: the currency most of its market value is
+# quoted in (Borsa Italiana ETFs → €). The class view does not convert, so any
+# position quoted in another currency is flagged under the KPIs.
+_pos_ccy = positions["symbol"].map(
+    lambda s: (quotes.get(s) or {}).get("currency") or pr.guess_currency(s) or "USD")
+_pos_mv = positions["qty"] * positions["symbol"].map(price_map).fillna(positions["snapshot_price"])
+CLASS_CCY = str(_pos_mv.groupby(_pos_ccy).sum().idxmax()) if len(positions) else "USD"
+CS = ui.CURRENCY_SYMBOLS.get(CLASS_CCY, CLASS_CCY + " ")
+_other_ccy = sorted(positions.loc[_pos_ccy != CLASS_CCY, "symbol"])
+
 positions = pf.enrich_with_prices(positions, price_map)
 positions["prev_close"] = positions["symbol"].map(prev_map).fillna(positions["snapshot_price"])
 positions["day_change_$"] = (positions["current_price"] - positions["prev_close"]) * positions["qty"]
@@ -1434,6 +1457,10 @@ port_xirr = pf.portfolio_xirr(tx, positions, today)
 ts = datetime.now().strftime("%Y-%m-%d %H:%M")
 src = "live (yfinance)" if use_live and quotes else "snapshot"
 st.caption(f"As of {ts} · prices: **{src}** · {len(positions)} open positions · benchmark: **{benchmark}**")
+if _other_ccy:
+    st.caption(f"ℹ️ Importi in **{CLASS_CCY}**. {', '.join(_other_ccy)} "
+               f"{'è quotato' if len(_other_ccy) == 1 else 'sono quotati'} in un'altra valuta "
+               "e qui è sommato senza conversione (la vista Generale converte tutto).")
 
 total_pnl_all = total_unrealized + total_realized
 
@@ -1455,16 +1482,16 @@ _son = f"{simple_on_net_o:+.2f}%" if simple_on_net_o is not None else "—"
 _rr = f"{realized_ret_o:+.2f}%" if realized_ret_o is not None else "—"
 
 ui.kpi_grid([
-    ui.kpi("Market value", ui.money(total_mv, "$"), f"{len(positions)} posizioni", hero=True),
-    ui.kpi("Day change", ui.money(day_change_total, "$"), ui.pct(day_change_pct),
+    ui.kpi("Market value", ui.money(total_mv, CS), f"{len(positions)} posizioni", hero=True),
+    ui.kpi("Day change", ui.money(day_change_total, CS), ui.pct(day_change_pct),
            positive=day_change_total >= 0),
-    ui.kpi("Unrealized P&L", ui.money(total_unrealized, "$"),
+    ui.kpi("Unrealized P&L", ui.money(total_unrealized, CS),
            ui.pct(total_unrealized / total_invested * 100 if total_invested else 0) + " sul costo",
            positive=total_unrealized >= 0),
-    ui.kpi("Realized P&L", ui.money(total_realized, "$"),
+    ui.kpi("Realized P&L", ui.money(total_realized, CS),
            f"Realized {_rr}" if realized_ret_o is not None else "da lotti chiusi",
            positive=(realized_ret_o >= 0) if realized_ret_o is not None else None),
-    ui.kpi("Total P&L", ui.money(total_pnl_all, "$"), f"Simple/net cash {_son}",
+    ui.kpi("Total P&L", ui.money(total_pnl_all, CS), f"Simple/net cash {_son}",
            positive=(simple_on_net_o >= 0) if simple_on_net_o is not None else None),
     ui.kpi("XIRR (MWR)", ui.pct(port_xirr * 100) if port_xirr else "n/a",
            "money-weighted, annuo", positive=(port_xirr or 0) >= 0),
@@ -1554,7 +1581,7 @@ with tab_overview:
                 fig.update_traces(
                     textposition="outside", textinfo="label+percent",
                     marker=dict(line=dict(color="#0e1117", width=2)),
-                    hovertemplate=("<b>%{label}</b><br>$%{value:,.0f}"
+                    hovertemplate=("<b>%{label}</b><br>" + CS + "%{value:,.0f}"
                                    "<br>%{customdata[0]} holdings"
                                    "<br>Return %{customdata[1]:+.1f}%<extra></extra>"),
                 )
@@ -1652,9 +1679,9 @@ with tab_overview:
                     st.dataframe(
                         detail_show, use_container_width=True, hide_index=True,
                         column_config={
-                            "Mkt Value": st.column_config.NumberColumn(format="$%.0f"),
+                            "Mkt Value": st.column_config.NumberColumn(format=f"{CS}%.0f"),
                             "Return %": st.column_config.NumberColumn(format="%.1f%%"),
-                            "Unrlzd P&L": st.column_config.NumberColumn(format="$%.0f"),
+                            "Unrlzd P&L": st.column_config.NumberColumn(format=f"{CS}%.0f"),
                         },
                         height=min(420, 38 * (len(detail_show) + 1)),
                     )
@@ -1664,7 +1691,7 @@ with tab_overview:
                     sub_ret = (sub_pnl / sub_inv * 100.0) if sub_inv > 0 else 0.0
                     dd1, dd2, dd3 = st.columns(3)
                     dd1.metric("Holdings", len(detail))
-                    dd2.metric("Mkt value", f"${sub_mv:,.0f}")
+                    dd2.metric("Mkt value", f"{CS}{sub_mv:,.0f}")
                     dd3.metric("Return %", f"{sub_ret:+.2f}%")
 
             st.markdown("---")
@@ -1713,7 +1740,7 @@ with tab_overview:
         fig3 = go.Figure(go.Bar(
             x=contrib["total_pnl"], y=contrib["symbol"], orientation="h",
             marker_color=["#22c55e" if v >= 0 else "#f43f5e" for v in contrib["total_pnl"]],
-            text=[f"${v:,.0f} ({p:.1f}%)" for v, p in zip(contrib["total_pnl"], contrib["contribution_pct"])],
+            text=[f"{CS}{v:,.0f} ({p:.1f}%)" for v, p in zip(contrib["total_pnl"], contrib["contribution_pct"])],
             textposition="outside",
         ))
         fig3.update_layout(height=480, margin=dict(t=10, b=10, l=10, r=140),
@@ -1746,13 +1773,13 @@ with tab_recap:
 
         st.subheader("Capital flow")
         r1, r2, r3, r4 = st.columns(4)
-        r1.metric("Total capital deployed", f"${total_deployed:,.0f}",
-                  help="Cumulative $ spent on all BUYs across history")
-        r2.metric("Total capital returned", f"${total_returned:,.0f}",
-                  help="Cumulative $ received from all SELLs")
-        r3.metric("Net cash invested", f"${net_cash_in:,.0f}",
+        r1.metric("Total capital deployed", f"{CS}{total_deployed:,.0f}",
+                  help=f"Cumulative {CS} spent on all BUYs across history")
+        r2.metric("Total capital returned", f"{CS}{total_returned:,.0f}",
+                  help=f"Cumulative {CS} received from all SELLs")
+        r3.metric("Net cash invested", f"{CS}{net_cash_in:,.0f}",
                   help="Deployed − Returned (net money put into the portfolio)")
-        r4.metric("Current capital invested", f"${current_invested:,.0f}",
+        r4.metric("Current capital invested", f"{CS}{current_invested:,.0f}",
                   help="Cost basis of currently-open positions")
 
         st.markdown("---")
@@ -1761,20 +1788,20 @@ with tab_recap:
         with col_r:
             st.subheader("💵 Realized")
             rg, rl, rn = st.columns(3)
-            rg.metric("Gains", f"${real_g:,.0f}",
+            rg.metric("Gains", f"{CS}{real_g:,.0f}",
                       help=f"{(all_positions['realized_pnl'] > 0).sum()} winning closed/partial positions")
-            rl.metric("Losses", f"${real_l:,.0f}",
+            rl.metric("Losses", f"{CS}{real_l:,.0f}",
                       help=f"{(all_positions['realized_pnl'] < 0).sum()} losing closed/partial positions")
-            rn.metric("Net realized", f"${net_real:,.0f}")
+            rn.metric("Net realized", f"{CS}{net_real:,.0f}")
 
         with col_u:
             st.subheader("📈 Unrealized")
             ug, ul, un = st.columns(3)
-            ug.metric("Gains", f"${unr_g:,.0f}",
+            ug.metric("Gains", f"{CS}{unr_g:,.0f}",
                       help=f"{(positions['unrealized_pnl'] > 0).sum()} winning open positions")
-            ul.metric("Losses", f"${unr_l:,.0f}",
+            ul.metric("Losses", f"{CS}{unr_l:,.0f}",
                       help=f"{(positions['unrealized_pnl'] < 0).sum()} losing open positions")
-            un.metric("Net unrealized", f"${net_unr:,.0f}")
+            un.metric("Net unrealized", f"{CS}{net_unr:,.0f}")
 
         # Aggregate TROIC = Σ lifetime value / Σ lifetime invested − 1 (across ALL
         # symbols ever traded, incl. closed). Single source of truth: lifetime_stats.
@@ -1787,7 +1814,7 @@ with tab_recap:
 
         st.markdown("---")
         t1, t2, t3, t4 = st.columns(4)
-        t1.metric("Total P&L", f"${total_pnl_recap:,.0f}",
+        t1.metric("Total P&L", f"{CS}{total_pnl_recap:,.0f}",
                   help="Net realized + Net unrealized")
         t2.metric("Return on deployed capital", f"{return_on_deployed:+.2f}%")
         t3.metric("TROIC", f"{agg_troic*100:+.2f}%" if agg_troic is not None else "—",
@@ -1807,7 +1834,7 @@ with tab_recap:
         fig = go.Figure(go.Bar(
             x=bd["category"], y=bd["value"],
             marker_color=["#22c55e", "#f43f5e", "#22c55e", "#f43f5e"],
-            text=[f"${v:,.0f}" for v in bd["value"]],
+            text=[f"{CS}{v:,.0f}" for v in bd["value"]],
             textposition="outside",
         ))
         fig.update_layout(height=360, margin=dict(t=20, b=10, l=10, r=10),
@@ -1825,9 +1852,9 @@ with tab_recap:
                 contrib[contrib["total_pnl"] > 0].head(10)[["symbol", "unrealized_pnl", "realized_pnl", "total_pnl"]],
                 use_container_width=True, hide_index=True,
                 column_config={
-                    "unrealized_pnl": st.column_config.NumberColumn("Unrealized", format="$%.0f"),
-                    "realized_pnl": st.column_config.NumberColumn("Realized", format="$%.0f"),
-                    "total_pnl": st.column_config.NumberColumn("Total", format="$%.0f"),
+                    "unrealized_pnl": st.column_config.NumberColumn("Unrealized", format=f"{CS}%.0f"),
+                    "realized_pnl": st.column_config.NumberColumn("Realized", format=f"{CS}%.0f"),
+                    "total_pnl": st.column_config.NumberColumn("Total", format=f"{CS}%.0f"),
                 },
             )
         with cl:
@@ -1837,9 +1864,9 @@ with tab_recap:
                     ["symbol", "unrealized_pnl", "realized_pnl", "total_pnl"]],
                 use_container_width=True, hide_index=True,
                 column_config={
-                    "unrealized_pnl": st.column_config.NumberColumn("Unrealized", format="$%.0f"),
-                    "realized_pnl": st.column_config.NumberColumn("Realized", format="$%.0f"),
-                    "total_pnl": st.column_config.NumberColumn("Total", format="$%.0f"),
+                    "unrealized_pnl": st.column_config.NumberColumn("Unrealized", format=f"{CS}%.0f"),
+                    "realized_pnl": st.column_config.NumberColumn("Realized", format=f"{CS}%.0f"),
+                    "total_pnl": st.column_config.NumberColumn("Total", format=f"{CS}%.0f"),
                 },
             )
 
@@ -1982,26 +2009,26 @@ with tab_today:
         n_dn = int((td["day_change_$"] < 0).sum())
 
         t1, t2, t3, t4 = st.columns(4)
-        t1.metric("Total $ change today", f"${total_today_dollar:,.0f}")
+        t1.metric(f"Total {CS} change today", f"{CS}{total_today_dollar:,.0f}")
         t2.metric("Value-weighted %", f"{weighted_pct:+.2f}%")
         t3.metric("Up / Down", f"{n_up} / {n_dn}")
         if len(td):
             t4.metric("Best", f"{td['symbol'].iloc[0]}",
                       f"{td['day_change_%'].iloc[0]:+.2f}%")
 
-        st.subheader("$ contribution to today's move")
+        st.subheader(f"{CS} contribution to today's move")
         bars = td.copy()
         bars["sort_key"] = bars["day_change_$"].abs()
         bars = bars.sort_values("sort_key", ascending=True).tail(40)
         fig = go.Figure(go.Bar(
             x=bars["day_change_$"], y=bars["symbol"], orientation="h",
             marker_color=["#22c55e" if v >= 0 else "#f43f5e" for v in bars["day_change_$"]],
-            text=[f"${v:,.0f} ({p:+.2f}%)" for v, p in zip(bars["day_change_$"], bars["day_change_%"])],
+            text=[f"{CS}{v:,.0f} ({p:+.2f}%)" for v, p in zip(bars["day_change_$"], bars["day_change_%"])],
             textposition="outside",
         ))
         fig.update_layout(height=max(420, len(bars) * 22), margin=dict(t=20, b=10, l=10, r=140),
                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                          xaxis_title="$ change today",
+                          xaxis_title=f"{CS} change today",
                           xaxis=dict(zerolinecolor="#666"),
                           yaxis=dict(autorange="reversed"))
         st.plotly_chart(fig, use_container_width=True)
@@ -2023,18 +2050,18 @@ with tab_today:
         show_td = td.rename(columns={
             "symbol": "Symbol", "qty": "Qty",
             "current_price": "Price", "prev_close": "Prev Close",
-            "day_change_$": "$ Change", "day_change_%": "% Change",
+            "day_change_$": f"{CS} Change", "day_change_%": "% Change",
             "market_value": "Mkt Value",
         })
         st.dataframe(
             show_td, use_container_width=True, hide_index=True,
             column_config={
                 "Qty": st.column_config.NumberColumn(format="%.2f"),
-                "Price": st.column_config.NumberColumn(format="$%.2f"),
-                "Prev Close": st.column_config.NumberColumn(format="$%.2f"),
-                "$ Change": st.column_config.NumberColumn(format="$%.2f"),
+                "Price": st.column_config.NumberColumn(format=f"{CS}%.2f"),
+                "Prev Close": st.column_config.NumberColumn(format=f"{CS}%.2f"),
+                f"{CS} Change": st.column_config.NumberColumn(format=f"{CS}%.2f"),
                 "% Change": st.column_config.NumberColumn(format="%.2f%%"),
-                "Mkt Value": st.column_config.NumberColumn(format="$%.0f"),
+                "Mkt Value": st.column_config.NumberColumn(format=f"{CS}%.0f"),
                 "RSI": st.column_config.TextColumn("RSI", help="Relative Strength Index (14, Wilder). "
                                                    ">70 overbought · <30 oversold."),
             },
@@ -2145,7 +2172,7 @@ with tab_pos:
                 "total_value": "Total Value",
                 "troic_pct": "TROIC %",
                 "avg_sale_price": "Avg Sale Price",
-                "dollar_since_sale": "$ Since Sale",
+                "dollar_since_sale": f"{CS} Since Sale",
                 "pct_since_sale": "% Since Sale",
                 "xirr_pct": "XIRR",
                 "first_buy": "First Buy",
@@ -2155,35 +2182,35 @@ with tab_pos:
                 display, use_container_width=True, hide_index=True,
                 column_config={
                     "Qty": st.column_config.NumberColumn(format="%.2f"),
-                    "Avg Cost": st.column_config.NumberColumn(format="$%.2f"),
-                    "Price": st.column_config.NumberColumn(format="$%.2f"),
-                    "Mkt Value": st.column_config.NumberColumn(format="$%.0f"),
+                    "Avg Cost": st.column_config.NumberColumn(format=f"{CS}%.2f"),
+                    "Price": st.column_config.NumberColumn(format=f"{CS}%.2f"),
+                    "Mkt Value": st.column_config.NumberColumn(format=f"{CS}%.0f"),
                     "Day %": st.column_config.NumberColumn(format="%.2f%%"),
-                    "Unrlzd P&L": st.column_config.NumberColumn(format="$%.0f"),
-                    "Rlzd P&L": st.column_config.NumberColumn(format="$%.0f"),
-                    "Total P&L": st.column_config.NumberColumn(format="$%.0f"),
+                    "Unrlzd P&L": st.column_config.NumberColumn(format=f"{CS}%.0f"),
+                    "Rlzd P&L": st.column_config.NumberColumn(format=f"{CS}%.0f"),
+                    "Total P&L": st.column_config.NumberColumn(format=f"{CS}%.0f"),
                     "Return %": st.column_config.NumberColumn(format="%.1f%%"),
                     "Total Cost": st.column_config.NumberColumn(
-                        format="$%.0f",
+                        format=f"{CS}%.0f",
                         help="Lifetime invested capital: Σ (qty × price) over all BUYs for this symbol.",
                     ),
                     "Total Value": st.column_config.NumberColumn(
-                        format="$%.0f",
+                        format=f"{CS}%.0f",
                         help="Lifetime value: current market value of open shares + cash returned from all SELLs.",
                     ),
                     "TROIC %": st.column_config.NumberColumn(
                         format="%.1f%%",
                         help="Total Return on Invested Capital: Total Value ÷ Total Cost − 1.",
                     ),
-                    "Avg Sale Price": st.column_config.NumberColumn(format="$%.2f"),
-                    "$ Since Sale": st.column_config.NumberColumn(
-                        format="$%.0f",
+                    "Avg Sale Price": st.column_config.NumberColumn(format=f"{CS}%.2f"),
+                    f"{CS} Since Sale": st.column_config.NumberColumn(
+                        format=f"{CS}%.0f",
                         help="Positive = price went up after sale (missed gains). "
                              "Negative = price went down after sale (sold well).",
                     ),
                     "% Since Sale": st.column_config.NumberColumn(
                         format="%.2f%%",
-                        help="Same sign convention as $ Since Sale.",
+                        help=f"Same sign convention as {CS} Since Sale.",
                     ),
                     "First Buy": st.column_config.DateColumn(format="YYYY-MM-DD"),
                 },
@@ -2227,7 +2254,7 @@ with tab_pos:
                 "Total Cost": tot_total_cost,
                 "Total Value": tot_total_value,
                 "TROIC %": tot_troic_pct,
-                "$ Since Sale": ss_dollar_total if sale_value_total > 0 else None,
+                f"{CS} Since Sale": ss_dollar_total if sale_value_total > 0 else None,
                 "% Since Sale": tot_pct_since_sale,
                 "XIRR": f"{subset_xirr*100:.1f}%" if subset_xirr is not None else "—",
             }])
@@ -2235,15 +2262,15 @@ with tab_pos:
             st.dataframe(
                 total_row, use_container_width=True, hide_index=True,
                 column_config={
-                    "Mkt Value": st.column_config.NumberColumn(format="$%.0f"),
-                    "Unrlzd P&L": st.column_config.NumberColumn(format="$%.0f"),
-                    "Rlzd P&L": st.column_config.NumberColumn(format="$%.0f"),
-                    "Total P&L": st.column_config.NumberColumn(format="$%.0f"),
+                    "Mkt Value": st.column_config.NumberColumn(format=f"{CS}%.0f"),
+                    "Unrlzd P&L": st.column_config.NumberColumn(format=f"{CS}%.0f"),
+                    "Rlzd P&L": st.column_config.NumberColumn(format=f"{CS}%.0f"),
+                    "Total P&L": st.column_config.NumberColumn(format=f"{CS}%.0f"),
                     "Return %": st.column_config.NumberColumn(format="%.2f%%"),
-                    "Total Cost": st.column_config.NumberColumn(format="$%.0f"),
-                    "Total Value": st.column_config.NumberColumn(format="$%.0f"),
+                    "Total Cost": st.column_config.NumberColumn(format=f"{CS}%.0f"),
+                    "Total Value": st.column_config.NumberColumn(format=f"{CS}%.0f"),
                     "TROIC %": st.column_config.NumberColumn(format="%.1f%%"),
-                    "$ Since Sale": st.column_config.NumberColumn(format="$%.0f"),
+                    f"{CS} Since Sale": st.column_config.NumberColumn(format=f"{CS}%.0f"),
                     "% Since Sale": st.column_config.NumberColumn(format="%.2f%%"),
                 },
             )
@@ -2366,7 +2393,7 @@ with tab_perf:
             st.plotly_chart(fig, use_container_width=True)
 
             # Equity curve ($) — market value vs net capital invested
-            st.subheader("Equity curve ($)")
+            st.subheader(f"Equity curve ({CS})")
             st.caption("Blue = market value of holdings. Amber = cumulative net cash invested "
                        "(buys − sells). Gap between them = mark-to-market total P&L.")
             cum_capital_curve = cf_series.cumsum()
@@ -2376,23 +2403,23 @@ with tab_perf:
                 line=dict(color="#7c8eff", width=2),
                 fill="tozeroy", fillcolor="rgba(124,142,255,0.08)",
                 name="Market value",
-                hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra>Market value</extra>",
+                hovertemplate="%{x|%Y-%m-%d}<br>" + CS + "%{y:,.0f}<extra>Market value</extra>",
             ))
             fig2.add_trace(go.Scatter(
                 x=cum_capital_curve.index, y=cum_capital_curve.values, mode="lines",
                 line=dict(color="#f4b942", width=2, dash="dot"),
                 name="Net capital invested",
-                hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra>Net capital</extra>",
+                hovertemplate="%{x|%Y-%m-%d}<br>" + CS + "%{y:,.0f}<extra>Net capital</extra>",
             ))
             fig2.update_layout(height=360, margin=dict(t=10, b=10, l=10, r=10),
                                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                               yaxis_title="$", xaxis=dict(showgrid=False),
+                               yaxis_title=CS, xaxis=dict(showgrid=False),
                                yaxis=dict(gridcolor="#222"),
                                legend=dict(orientation="h", yanchor="bottom", y=1.02))
             st.plotly_chart(fig2, use_container_width=True)
 
             # Cumulative absolute $ P&L over time
-            st.subheader("Total P&L over time ($)")
+            st.subheader(f"Total P&L over time ({CS})")
             st.caption("Mark-to-market: portfolio value minus net cash invested. "
                        "Positive = winning overall, negative = losing.")
             cum_deposits = cf_series.cumsum()
@@ -2422,7 +2449,7 @@ with tab_perf:
                 x=total_pnl_curve.index, y=total_pnl_curve.values,
                 mode="lines", line=dict(color="#e8edf5", width=2),
                 name="Total P&L",
-                hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra></extra>",
+                hovertemplate="%{x|%Y-%m-%d}<br>" + CS + "%{y:,.0f}<extra></extra>",
             ))
             fig3.add_hline(y=0, line_dash="dash", line_color="#666")
             # Mark peak and trough
@@ -2434,25 +2461,25 @@ with tab_perf:
                 mode="markers+text",
                 marker=dict(size=10, color=["#22c55e", "#f43f5e"],
                             line=dict(color="#0e1117", width=2)),
-                text=[f"Peak ${total_pnl_curve.loc[peak_idx]:,.0f}",
-                      f"Trough ${total_pnl_curve.loc[trough_idx]:,.0f}"],
+                text=[f"Peak {CS}{total_pnl_curve.loc[peak_idx]:,.0f}",
+                      f"Trough {CS}{total_pnl_curve.loc[trough_idx]:,.0f}"],
                 textposition=["top center", "bottom center"],
                 textfont=dict(color="#e8edf5"),
                 showlegend=False, hoverinfo="skip",
             ))
             fig3.update_layout(height=380, margin=dict(t=20, b=10, l=10, r=10),
                                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                               yaxis_title="$ P&L", xaxis=dict(showgrid=False),
+                               yaxis_title=f"{CS} P&L", xaxis=dict(showgrid=False),
                                yaxis=dict(gridcolor="#222", zerolinecolor="#666"))
             st.plotly_chart(fig3, use_container_width=True)
 
             pk1, pk2, pk3, pk4 = st.columns(4)
-            pk1.metric("Current P&L", f"${total_pnl_curve.iloc[-1]:,.0f}")
+            pk1.metric("Current P&L", f"{CS}{total_pnl_curve.iloc[-1]:,.0f}")
             pk2.metric("Peak P&L",
-                       f"${total_pnl_curve.loc[peak_idx]:,.0f}",
+                       f"{CS}{total_pnl_curve.loc[peak_idx]:,.0f}",
                        help=f"on {peak_idx.date()}")
             pk3.metric("Trough P&L",
-                       f"${total_pnl_curve.loc[trough_idx]:,.0f}",
+                       f"{CS}{total_pnl_curve.loc[trough_idx]:,.0f}",
                        help=f"on {trough_idx.date()}")
             pk4.metric("Days winning",
                        f"{int((total_pnl_curve >= 0).sum())} / {len(total_pnl_curve)}")
@@ -2506,23 +2533,23 @@ with tab_daily:
             worst = df_daily.loc[df_daily["pct"].idxmin()]
 
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric(f"{n_days}d $ change (market)", f"${total_dollar:,.0f}")
+            m1.metric(f"{n_days}d {CS} change (market)", f"{CS}{total_dollar:,.0f}")
             m2.metric(window_label, f"{window_growth*100:+.2f}%")
             m3.metric("Best day",
                       f"{best['pct']:+.2f}%",
-                      f"${best['dollar']:,.0f} · {best['date'].date()}")
+                      f"{CS}{best['dollar']:,.0f} · {best['date'].date()}")
             m4.metric("Worst day",
                       f"{worst['pct']:+.2f}%",
-                      f"${worst['dollar']:,.0f} · {worst['date'].date()}")
+                      f"{CS}{worst['dollar']:,.0f} · {worst['date'].date()}")
 
             st.subheader(f"Daily {pct_label} — last {n_days} trading days")
             bars = df_daily.iloc[::-1]  # back to chronological for chart
             fig = go.Figure(go.Bar(
                 x=bars["date"], y=bars["pct"],
                 marker_color=["#22c55e" if v >= 0 else "#f43f5e" for v in bars["pct"]],
-                text=[f"{v:+.2f}%<br>${d:,.0f}" for v, d in zip(bars["pct"], bars["dollar"])],
+                text=[f"{v:+.2f}%<br>{CS}{d:,.0f}" for v, d in zip(bars["pct"], bars["dollar"])],
                 textposition="outside",
-                hovertemplate="%{x|%Y-%m-%d}<br>%{y:.2f}%<br>$%{customdata:,.0f}<extra></extra>",
+                hovertemplate="%{x|%Y-%m-%d}<br>%{y:.2f}%<br>" + CS + "%{customdata:,.0f}<extra></extra>",
                 customdata=bars["dollar"],
             ))
             fig.update_layout(height=420, margin=dict(t=20, b=10, l=10, r=10),
@@ -2539,8 +2566,8 @@ with tab_daily:
                 column_config={
                     "date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
                     "pct": st.column_config.NumberColumn("Return %", format="%.2f%%"),
-                    "dollar": st.column_config.NumberColumn("$ change", format="$%.0f"),
-                    "value": st.column_config.NumberColumn("End-of-day value", format="$%.0f"),
+                    "dollar": st.column_config.NumberColumn(f"{CS} change", format=f"{CS}%.0f"),
+                    "value": st.column_config.NumberColumn("End-of-day value", format=f"{CS}%.0f"),
                 },
                 height=min(700, 38 * (len(df_show) + 1)),
             )
@@ -2608,12 +2635,12 @@ with tab_holdings:
                     if not m:
                         return None
                     if m >= 1e12:
-                        return f"${m/1e12:.2f}T"
+                        return f"{CS}{m/1e12:.2f}T"
                     if m >= 1e9:
-                        return f"${m/1e9:.2f}B"
+                        return f"{CS}{m/1e9:.2f}B"
                     if m >= 1e6:
-                        return f"${m/1e6:.1f}M"
-                    return f"${m:,.0f}"
+                        return f"{CS}{m/1e6:.1f}M"
+                    return f"{CS}{m:,.0f}"
 
                 badge_parts = [f"**{sector}**"]
                 if industry and industry != "—":
@@ -2644,11 +2671,11 @@ with tab_holdings:
 
                 sk1, sk2, sk3, sk4, sk5, sk6, sk7 = st.columns(7)
                 sk1.metric("Qty", f"{cur_qty:,.2f}")
-                sk2.metric("Avg cost", f"${avg_cost_show:.2f}" if avg_cost_show is not None else "—")
-                sk3.metric("Mkt value", f"${mkt_value:,.0f}")
-                sk4.metric("Unrealized P&L", f"${unreal:,.0f}", f"{gain_pct:+.2f}%")
-                sk5.metric("Realized P&L", f"${cur_real:,.0f}")
-                sk6.metric("Total P&L", f"${total_pnl_sym:,.0f}")
+                sk2.metric("Avg cost", f"{CS}{avg_cost_show:.2f}" if avg_cost_show is not None else "—")
+                sk3.metric("Mkt value", f"{CS}{mkt_value:,.0f}")
+                sk4.metric("Unrealized P&L", f"{CS}{unreal:,.0f}", f"{gain_pct:+.2f}%")
+                sk5.metric("Realized P&L", f"{CS}{cur_real:,.0f}")
+                sk6.metric("Total P&L", f"{CS}{total_pnl_sym:,.0f}")
                 sk7.metric("XIRR", f"{sym_xirr*100:.2f}%" if sym_xirr is not None else "—",
                            help="Money-weighted annualized return")
 
@@ -2667,16 +2694,16 @@ with tab_holdings:
                     missed = hold_pnl - actual_pnl   # > 0 means holding would've been better
 
                     ss1, ss2, ss3, ss4 = st.columns(4)
-                    ss1.metric("Avg sale price", f"${avg_sale_price:.2f}",
+                    ss1.metric("Avg sale price", f"{CS}{avg_sale_price:.2f}",
                                help=f"{total_sell_qty:,.0f} shares sold, weighted average")
-                    ss2.metric("$ since sale", f"${ss_dollar:,.0f}",
+                    ss2.metric(f"{CS} since sale", f"{CS}{ss_dollar:,.0f}",
                                help="Positive = price went up since sale (missed gains). "
                                     "Negative = price went down since (sold well).")
                     ss3.metric("% since sale", f"{ss_pct:+.2f}%")
-                    ss4.metric("If you'd held all", f"${hold_value_now:,.0f}",
+                    ss4.metric("If you'd held all", f"{CS}{hold_value_now:,.0f}",
                                f"{missed:+,.0f} vs actual",
                                help=f"Value today if you'd never sold ({hold_qty:,.0f} shares × "
-                                    f"${cur_price:.2f}). The delta shows how much you missed "
+                                    f"{CS}{cur_price:.2f}). The delta shows how much you missed "
                                     f"(positive) or saved (negative) by selling.")
 
                 # ----- Key data ----------------------------------------------------
@@ -2737,7 +2764,7 @@ with tab_holdings:
                 k3.metric("Forward P/E", _fmt_num(key.get("forward_pe")))
                 k4.metric("PEG", _fmt_num(key.get("peg_ratio")))
                 k5.metric("Analyst target",
-                          f"${target:.2f}" if target else "—",
+                          f"{CS}{target:.2f}" if target else "—",
                           f"{upside:+.1f}% upside" if upside is not None else None)
                 k6.metric("Recommendation",
                           _rec_label(key.get("recommendation_key"), key.get("recommendation_mean")),
@@ -2761,7 +2788,7 @@ with tab_holdings:
                         marker=dict(size=[14, 18, 14],
                                     color=["#7c8eff", "#22c55e", "#7c8eff"],
                                     line=dict(color="#0e1117", width=2)),
-                        text=[f"Low ${t_low:.2f}", f"Mean ${target:.2f}", f"High ${t_high:.2f}"],
+                        text=[f"Low {CS}{t_low:.2f}", f"Mean {CS}{target:.2f}", f"High {CS}{t_high:.2f}"],
                         textposition=["bottom center", "top center", "bottom center"],
                         textfont=dict(color="#e8edf5"),
                         showlegend=False, hoverinfo="skip",
@@ -2770,7 +2797,7 @@ with tab_holdings:
                         x=[cur_price], y=[0], mode="markers+text",
                         marker=dict(size=16, color="#f4b942", symbol="diamond",
                                     line=dict(color="#0e1117", width=2)),
-                        text=[f"Now ${cur_price:.2f}"], textposition="top center",
+                        text=[f"Now {CS}{cur_price:.2f}"], textposition="top center",
                         textfont=dict(color="#f4b942"), name="Current",
                         showlegend=False, hoverinfo="skip",
                     ))
@@ -2787,10 +2814,10 @@ with tab_holdings:
                 def _scale_axis(values):
                     m = max(abs(v) for v in values if v is not None and not pd.isna(v)) if len(values) else 0
                     if m >= 1e9:
-                        return 1e9, "$B"
+                        return 1e9, f"{CS}B"
                     if m >= 1e6:
-                        return 1e6, "$M"
-                    return 1.0, "$"
+                        return 1e6, f"{CS}M"
+                    return 1.0, CS
 
                 ff_col1, ff_col2 = st.columns(2)
 
@@ -2899,7 +2926,7 @@ with tab_holdings:
                         x=h.index, y=h["close"], mode="lines",
                         line=dict(color="#7c8eff", width=2),
                         name="Price",
-                        hovertemplate="%{x|%Y-%m-%d}<br>$%{y:.2f}<extra></extra>",
+                        hovertemplate="%{x|%Y-%m-%d}<br>" + CS + "%{y:.2f}<extra></extra>",
                     ))
 
                     def marker_size(qty_arr):
@@ -2913,7 +2940,7 @@ with tab_holdings:
                                         size=marker_size(buys["qty"]),
                                         line=dict(color="#0e1117", width=1.5)),
                             name="Buy",
-                            text=[f"BUY {q:,.0f} @ ${p:.2f}" for q, p in zip(buys["qty"], buys["price"])],
+                            text=[f"BUY {q:,.0f} @ {CS}{p:.2f}" for q, p in zip(buys["qty"], buys["price"])],
                             hovertemplate="%{text}<br>%{x|%Y-%m-%d}<extra></extra>",
                         ))
                     if not sells.empty:
@@ -2923,20 +2950,20 @@ with tab_holdings:
                                         size=marker_size(sells["qty"]),
                                         line=dict(color="#0e1117", width=1.5)),
                             name="Sell",
-                            text=[f"SELL {q:,.0f} @ ${p:.2f}" for q, p in zip(sells["qty"], sells["price"])],
+                            text=[f"SELL {q:,.0f} @ {CS}{p:.2f}" for q, p in zip(sells["qty"], sells["price"])],
                             hovertemplate="%{text}<br>%{x|%Y-%m-%d}<extra></extra>",
                         ))
                     # Avg cost reference line
                     if cur_qty > 1e-6 and cur_inv > 0:
                         avg = cur_inv / cur_qty
                         fig.add_hline(y=avg, line_dash="dot", line_color="#aaa",
-                                      annotation_text=f"Avg cost ${avg:.2f}",
+                                      annotation_text=f"Avg cost {CS}{avg:.2f}",
                                       annotation_position="top right")
 
                     fig.update_layout(
                         height=520, margin=dict(t=20, b=10, l=10, r=10),
                         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        yaxis_title="$", xaxis=dict(showgrid=False),
+                        yaxis_title=CS, xaxis=dict(showgrid=False),
                         yaxis=dict(gridcolor="#222"),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02),
                         title=f"{selected} — price + transactions",
@@ -2954,9 +2981,9 @@ with tab_holdings:
                             "trade_date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
                             "side": "Side",
                             "qty": st.column_config.NumberColumn("Qty", format="%.2f"),
-                            "price": st.column_config.NumberColumn("Price", format="$%.4f"),
-                            "value": st.column_config.NumberColumn("$ value", format="$%.2f"),
-                            "cashflow": st.column_config.NumberColumn("Cashflow", format="$%.2f"),
+                            "price": st.column_config.NumberColumn("Price", format=f"{CS}%.4f"),
+                            "value": st.column_config.NumberColumn(f"{CS} value", format=f"{CS}%.2f"),
+                            "cashflow": st.column_config.NumberColumn("Cashflow", format=f"{CS}%.2f"),
                         },
                     )
 
@@ -3104,7 +3131,7 @@ with tab_div:
                 yld = (total_div / total_mv * 100.0) if total_mv else 0.0
 
                 d1, d2, d3 = st.columns(3)
-                d1.metric("Total dividends (est.)", f"${total_div:,.0f}")
+                d1.metric("Total dividends (est.)", f"{CS}{total_div:,.0f}")
                 d2.metric("Dividend yield (on MV)", f"{yld:.2f}%")
                 d3.metric("Paying positions", f"{div_df['symbol'].nunique()}")
 
@@ -3112,21 +3139,21 @@ with tab_div:
                 fig = go.Figure(go.Bar(
                     x=by_sym["total"], y=by_sym["symbol"], orientation="h",
                     marker_color="#22c55e",
-                    text=[f"${v:,.0f}" for v in by_sym["total"]], textposition="outside",
+                    text=[f"{CS}{v:,.0f}" for v in by_sym["total"]], textposition="outside",
                 ))
                 fig.update_layout(height=max(300, len(by_sym) * 28),
                                   margin=dict(t=10, b=10, l=10, r=60),
                                   paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                  xaxis_title="$ dividends", yaxis=dict(autorange="reversed"))
+                                  xaxis_title=f"{CS} dividends", yaxis=dict(autorange="reversed"))
                 st.plotly_chart(fig, use_container_width=True)
 
                 st.dataframe(
                     div_df, use_container_width=True, hide_index=True,
                     column_config={
                         "ex_date": st.column_config.DateColumn("Ex-Date", format="YYYY-MM-DD"),
-                        "per_share": st.column_config.NumberColumn("Per share", format="$%.4f"),
+                        "per_share": st.column_config.NumberColumn("Per share", format=f"{CS}%.4f"),
                         "qty_held": st.column_config.NumberColumn("Qty (current)", format="%.2f"),
-                        "total": st.column_config.NumberColumn("Estimated $", format="$%.2f"),
+                        "total": st.column_config.NumberColumn(f"Estimated {CS}", format=f"{CS}%.2f"),
                     },
                     height=400,
                 )
@@ -3219,10 +3246,10 @@ with tab_weekly:
                     "trades": st.column_config.NumberColumn("# Trades", format="%d"),
                     "buys": st.column_config.NumberColumn("Buys", format="%d"),
                     "sells": st.column_config.NumberColumn("Sells", format="%d"),
-                    "deployed": st.column_config.NumberColumn("$ Deployed", format="$%.0f"),
-                    "returned": st.column_config.NumberColumn("$ Returned", format="$%.0f"),
-                    "net_cash": st.column_config.NumberColumn("Net cash in", format="$%.0f"),
-                    "outcome": st.column_config.NumberColumn("Outcome since trade", format="$%.0f"),
+                    "deployed": st.column_config.NumberColumn(f"{CS} Deployed", format=f"{CS}%.0f"),
+                    "returned": st.column_config.NumberColumn(f"{CS} Returned", format=f"{CS}%.0f"),
+                    "net_cash": st.column_config.NumberColumn("Net cash in", format=f"{CS}%.0f"),
+                    "outcome": st.column_config.NumberColumn("Outcome since trade", format=f"{CS}%.0f"),
                 },
                 height=min(420, 38 * (len(wk_summary) + 1)),
             )
@@ -3237,12 +3264,12 @@ with tab_weekly:
                 group = view[view["week_start"] == w].sort_values("trade_date")
                 n = len(group)
                 net = float(-group["cashflow"].sum())  # positive = net deployed
-                net_str = f"deployed ${net:,.0f}" if net >= 0 else f"returned ${-net:,.0f}"
+                net_str = f"deployed {CS}{net:,.0f}" if net >= 0 else f"returned {CS}{-net:,.0f}"
                 outcome = float(group["outcome_$"].dropna().sum())
                 outcome_arrow = "↑" if outcome >= 0 else "↓"
                 header = (f"Week of {wstart.date()} → {wend.date()}  ·  "
                           f"{n} trade{'s' if n != 1 else ''}  ·  {net_str}  ·  "
-                          f"outcome since: {outcome_arrow} ${outcome:,.0f}")
+                          f"outcome since: {outcome_arrow} {CS}{outcome:,.0f}")
 
                 with st.expander(header, expanded=(i < 3)):
                     show = group[["trade_date", "symbol", "side", "qty", "price",
@@ -3256,7 +3283,7 @@ with tab_weekly:
                         "trade_date": "Date", "symbol": "Symbol", "side": "Side",
                         "qty": "Qty", "price": "Trade Price",
                         "current_price": "Current", "move_pct": "% Move",
-                        "outcome_$": "Outcome $", "worked_out": "Worked",
+                        "outcome_$": f"Outcome {CS}", "worked_out": "Worked",
                         "days_since": "Days held",
                     })
                     st.dataframe(
@@ -3264,10 +3291,10 @@ with tab_weekly:
                         column_config={
                             "Date": st.column_config.DateColumn(format="YYYY-MM-DD"),
                             "Qty": st.column_config.NumberColumn(format="%.2f"),
-                            "Trade Price": st.column_config.NumberColumn(format="$%.4f"),
-                            "Current": st.column_config.NumberColumn(format="$%.4f"),
+                            "Trade Price": st.column_config.NumberColumn(format=f"{CS}%.4f"),
+                            "Current": st.column_config.NumberColumn(format=f"{CS}%.4f"),
                             "% Move": st.column_config.NumberColumn(format="%.2f%%"),
-                            "Outcome $": st.column_config.NumberColumn(format="$%.0f"),
+                            f"Outcome {CS}": st.column_config.NumberColumn(format=f"{CS}%.0f"),
                             "Days held": st.column_config.NumberColumn(format="%d d"),
                         },
                     )
@@ -3286,8 +3313,8 @@ with tab_lots:
                 "trade_date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
                 "symbol": "Symbol", "side": "Side",
                 "qty": st.column_config.NumberColumn("Qty", format="%.2f"),
-                "price": st.column_config.NumberColumn("Price", format="$%.4f"),
-                "cashflow": st.column_config.NumberColumn("Cashflow", format="$%.2f"),
+                "price": st.column_config.NumberColumn("Price", format=f"{CS}%.4f"),
+                "cashflow": st.column_config.NumberColumn("Cashflow", format=f"{CS}%.2f"),
             },
             height=600,
         )
