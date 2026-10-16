@@ -173,7 +173,7 @@ def fetch_history_bulk(symbols: list[str], period: str = "6mo") -> pd.DataFrame:
 
 
 def fetch_intraday_bulk(symbols: list[str], period: str = "5d",
-                        interval: str = "15m") -> pd.DataFrame:
+                        interval: str = "15m", prepost: bool = False) -> pd.DataFrame:
     """Intraday closes, one column per symbol, on a shared UTC index.
 
     ignore_tz=False keeps each exchange's timestamps tz-aware so US, EU and
@@ -185,7 +185,7 @@ def fetch_intraday_bulk(symbols: list[str], period: str = "5d",
     try:
         data = yf.download(tickers=" ".join(symbols), period=period, interval=interval,
                            auto_adjust=True, group_by="ticker", progress=False,
-                           threads=True, ignore_tz=False)
+                           threads=True, ignore_tz=False, prepost=prepost)
     except Exception:
         return pd.DataFrame()
     closes = _closes_from_download(data, list(symbols))
