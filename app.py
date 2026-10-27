@@ -163,59 +163,65 @@ with st.sidebar:
     st.divider()
     st.markdown("#### Bond / BTP")
     bond_included = st.checkbox("Includi BTP nel portafoglio", value=True, key="bond_incl")
-    _bd = bonds.load_bond_data(BOND_JSON)
-    inflation_assumed = st.slider("Inflazione assunta (% per YTM nominale)",
+    _bds = bonds.load_bonds_data(BOND_JSON)
+    inflation_assumed = st.slider("Inflazione assunta (% per YTM nominale BTP reali)",
                                   0.0, 8.0, 2.0, 0.1, key="b_infl")
-    with st.expander("Dati BTP", expanded=False):
-        b_isin = st.text_input("ISIN", _bd["isin"], key="b_isin")
-        b_nominal = st.number_input("Nominale (EUR)", value=float(_bd["nominal"]),
-                                    step=1000.0, key="b_nom")
-        b_load = st.number_input("Prezzo medio carico (base 100)", value=float(_bd["price_load"]),
-                                 step=0.01, format="%.4f", key="b_load")
-        # Market price: live-fetchable. Use session_state so the Fetch button can
-        # push a value into the widget without the value=/key= conflict.
-        st.session_state.setdefault("b_market", float(_bd["price_market"]))
-        cpa, cpb = st.columns([2, 1])
-        if cpb.button("Fetch live", help=f"yfinance ISIN {b_isin}"):
-            _q = pr.fetch_quotes([b_isin])
-            _live = _q.get(b_isin, {}).get("price")
-            if _live:
-                st.session_state["b_market"] = round(float(_live), 4)
-                st.success(f"Live {float(_live):.4f}")
-                st.rerun()
-            else:
-                st.warning("Prezzo live non trovato — uso il manuale.")
-        b_market = cpa.number_input("Prezzo mercato (base 100)", step=0.01,
-                                    format="%.4f", key="b_market")
-        b_coupon = st.number_input("Cedola annua reale (%)", value=float(_bd["coupon_pct"]),
-                                   step=0.05, key="b_coupon")
-        b_freq = st.selectbox("Frequenza cedole/anno", [1, 2, 4],
-                              index=[1, 2, 4].index(int(_bd["frequency"])), key="b_freq")
-        b_accrued = st.number_input("Rateo in corso (EUR)", value=float(_bd["accrued"]),
-                                    step=1.0, key="b_accr")
-        b_next = st.date_input("Prossima cedola",
-                               value=date.fromisoformat(str(_bd["next_coupon"])), key="b_next")
-        b_mat = st.date_input("Scadenza",
-                              value=date.fromisoformat(str(_bd["maturity"])), key="b_mat")
-        if st.button("Salva BTP", icon=":material/save:", width="stretch"):
-            bonds.save_bond_data(BOND_JSON, {
-                "isin": b_isin, "nominal": b_nominal, "price_load": b_load,
-                "price_market": b_market, "coupon_pct": b_coupon, "frequency": b_freq,
-                "accrued": b_accrued, "next_coupon": b_next, "maturity": b_mat,
-                "currency": "EUR"})
-            st.success("BTP salvato.")
+    _bond_inputs: list[dict] = []
+    for _i, _bd in enumerate(_bds):
+        with st.expander(f"Dati BTP · {_bd['isin']}", expanded=False):
+            b_isin = st.text_input("ISIN", _bd["isin"], key=f"b_isin_{_i}")
+            b_nominal = st.number_input("Nominale (EUR)", value=float(_bd["nominal"]),
+                                        step=1000.0, key=f"b_nom_{_i}")
+            b_load = st.number_input("Prezzo medio carico (base 100)",
+                                     value=float(_bd["price_load"]),
+                                     step=0.01, format="%.4f", key=f"b_load_{_i}")
+            # Market price: live-fetchable. Use session_state so the Fetch button can
+            # push a value into the widget without the value=/key= conflict.
+            st.session_state.setdefault(f"b_market_{_i}", float(_bd["price_market"]))
+            cpa, cpb = st.columns([2, 1])
+            if cpb.button("Fetch live", help=f"yfinance ISIN {b_isin}", key=f"b_fetch_{_i}"):
+                _q = pr.fetch_quotes([b_isin])
+                _live = _q.get(b_isin, {}).get("price")
+                if _live:
+                    st.session_state[f"b_market_{_i}"] = round(float(_live), 4)
+                    st.success(f"Live {float(_live):.4f}")
+                    st.rerun()
+                else:
+                    st.warning("Prezzo live non trovato — uso il manuale.")
+            b_market = cpa.number_input("Prezzo mercato (base 100)", step=0.01,
+                                        format="%.4f", key=f"b_market_{_i}")
+            b_real = st.checkbox("Cedola reale (indicizzato all'inflazione)",
+                                 value=bool(_bd["coupon_real"]), key=f"b_real_{_i}")
+            b_coupon = st.number_input("Cedola annua (%)", value=float(_bd["coupon_pct"]),
+                                       step=0.05, key=f"b_coupon_{_i}")
+            b_bullet = st.checkbox("Cedola unica a scadenza",
+                                   value=bool(_bd["coupon_at_maturity"]), key=f"b_bullet_{_i}")
+            b_freq = st.selectbox("Frequenza cedole/anno", [1, 2, 4],
+                                  index=[1, 2, 4].index(int(_bd["frequency"])),
+                                  key=f"b_freq_{_i}")
+            b_accrued = st.number_input("Rateo in corso (EUR)", value=float(_bd["accrued"]),
+                                        step=1.0, key=f"b_accr_{_i}")
+            b_next = st.date_input("Prossima cedola",
+                                   value=date.fromisoformat(str(_bd["next_coupon"])),
+                                   key=f"b_next_{_i}")
+            b_mat = st.date_input("Scadenza",
+                                  value=date.fromisoformat(str(_bd["maturity"])),
+                                  key=f"b_mat_{_i}")
+        _bond_inputs.append({
+            "isin": b_isin, "nominal": b_nominal, "price_load": b_load,
+            "price_market": b_market, "coupon_pct": b_coupon, "frequency": b_freq,
+            "accrued": b_accrued, "next_coupon": b_next, "maturity": b_mat,
+            "currency": "EUR", "coupon_real": b_real, "coupon_at_maturity": b_bullet})
+    if st.button("Salva BTP", icon=":material/save:", width="stretch"):
+        bonds.save_bonds_data(BOND_JSON, _bond_inputs)
+        st.success("BTP salvati.")
 
-    bond = None
+    bond_list: list[bonds.Bond] = []
     if bond_included:
         try:
-            bond = bonds.Bond(
-                isin=b_isin, nominal=float(b_nominal), price_load=float(b_load),
-                price_market=float(b_market), coupon_pct=float(b_coupon),
-                frequency=int(b_freq), accrued=float(b_accrued),
-                next_coupon=b_next, maturity=b_mat, currency="EUR")
-        except Exception as e:  # noqa: BLE001 — surface bad manual input, don't crash
+            bond_list = [bonds.bond_from_dict(b) for b in _bond_inputs]
+        except (ValueError, TypeError) as e:  # surface bad manual input, don't crash
             st.error(f"Bond input error: {e}")
-            bond = None
 
     st.divider()
     st.caption(f"Valuation date · **{date.today().strftime('%d %b %Y')}**")
@@ -258,7 +264,7 @@ if crypto_file is not None:
 if not _sources and DEFAULT_CSV.exists():
     _sources.append((str(DEFAULT_CSV), "stocks"))
 
-if not _sources and bond is None:
+if not _sources and not bond_list:
     ui.hero("JBD", "Portfolio Monitor", "Upload a portfolio to get started",
             live=False, stamp=date.today().strftime("%A, %d %B %Y"))
     st.info(
@@ -293,7 +299,7 @@ else:
 # is identical to the previous single-file app.
 present_classes = [c for c in ("stocks", "etf", "crypto") if c in set(tx_all["asset_class"])]
 # The bond is not a CSV class — append it when the BTP is included in the sidebar.
-if bond is not None:
+if bond_list:
     present_classes = present_classes + ["bond"]
 
 ui.hero("JBD", "Portfolio Monitor",
@@ -413,7 +419,8 @@ def _bond_position_row(bond) -> dict:
     }
 
 
-def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
+def render_general(tx_all: pd.DataFrame, classes: list[str],
+                   bond_list: list[bonds.Bond]) -> None:
     """Cross-asset aggregate view ('Generale').
 
     Positions are built per class and concatenated with the asset_class tag, so
@@ -489,9 +496,10 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     # Inject the bond as a static EUR position (option b): it lands in the totals,
     # allocation, holdings and filter, but carries no transactions — so it is absent
     # from tx_sel/tx_eur and thus excluded from XIRR and the Performance series.
-    bond_in = bond is not None and "bond" in classes
+    bond_in = bool(bond_list) and "bond" in classes
+    bond_load_eur = sum(b.load_value for b in bond_list) if bond_in else 0.0
     if bond_in:
-        all_pos = pd.concat([all_pos, pd.DataFrame([_bond_position_row(bond)])],
+        all_pos = pd.concat([all_pos, pd.DataFrame([_bond_position_row(b) for b in bond_list])],
                             ignore_index=True)
 
     convertible = all_pos["divisor"].notna()
@@ -505,7 +513,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     total_pnl_eur = total_unreal_eur + total_real_eur
     # The bond is excluded from XIRR and the Performance time-series (it has no tx
     # history); those use the CSV-only market value for the terminal/pin.
-    bond_mv_eur = bond.market_value if bond_in else 0.0
+    bond_mv_eur = sum(b.market_value for b in bond_list) if bond_in else 0.0
     csv_mv_eur = total_mv_eur - bond_mv_eur
 
     # EUR cashflow basis — single source of truth for "simple return on net cash",
@@ -515,13 +523,15 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
     sym_div = {s: divisor.get(ccy_map.get(s)) for s in all_syms}
     conv_syms = [s for s in all_syms if sym_div.get(s)]
     tx_eur = tx_sel[tx_sel["symbol"].isin(conv_syms)].copy()
-    tx_eur["price"] = tx_eur.apply(lambda r: r["price"] / sym_div[r["symbol"]], axis=1)
+    # Vectorized: DataFrame.apply(axis=1) on an empty frame (live prices off, so no
+    # currency resolves) returns a DataFrame and breaks the column assignment.
+    tx_eur["price"] = tx_eur["price"] / tx_eur["symbol"].map(sym_div)
     buy_eur = tx_eur[tx_eur["side"] == "BUY"]
     sell_eur = tx_eur[tx_eur["side"] == "SELL"]
     deployed_eur = float((buy_eur["qty"] * buy_eur["price"]).sum())
     returned_eur = float((sell_eur["qty"] * sell_eur["price"]).sum())
     if bond_in:
-        deployed_eur += bond.load_value  # bond = single buy at load value, no sells
+        deployed_eur += bond_load_eur  # each bond = single buy at load value, no sells
     net_cash_in_eur = deployed_eur - returned_eur
     simple_on_net = (total_pnl_eur / net_cash_in_eur * 100.0) if net_cash_in_eur > 0 else 0.0
 
@@ -608,7 +618,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
             # same simple-return formula as the headline KPI. The bond has no tx, so
             # its net cash is its load value (single buy, no sells).
             if cls == "bond" and bond_in:
-                cls_net = bond.load_value
+                cls_net = bond_load_eur
             else:
                 cls_tx = tx_eur[tx_eur["asset_class"] == cls]
                 cls_buy = cls_tx[cls_tx["side"] == "BUY"]
@@ -648,7 +658,8 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
                   .assign(_c=lambda d: d["qty"] * d["price"])
                   .groupby(["symbol", "asset_class"])["_c"].sum())
     if bond_in:  # bond gross cost = its load value (single buy, no tx)
-        gross_cost.loc[(bond.isin, "bond")] = bond.load_value
+        for b in bond_list:
+            gross_cost.loc[(b.isin, "bond")] = b.load_value
     table["gross_cost_eur"] = [gross_cost.get((s, a))
                                for s, a in zip(table["symbol"], table["asset_class"])]
     table["return_pct"] = table["total_pnl_eur"] / table["gross_cost_eur"] * 100.0
@@ -986,12 +997,21 @@ def render_general(tx_all: pd.DataFrame, classes: list[str], bond=None) -> None:
                        "no price history, so it carries no time series.")
 
 
-def render_bond_view(bond, inflation_pct: float) -> None:
-    """Dedicated per-class view for the bond (no CSV tabs)."""
+def render_bond_view(bond_list: list[bonds.Bond], inflation_pct: float) -> None:
+    """Dedicated per-class view for the bonds (no CSV tabs): one section each."""
+    for i, bond in enumerate(bond_list):
+        if i:
+            st.divider()
+        _render_one_bond(bond, inflation_pct)
+
+
+def _render_one_bond(bond: bonds.Bond, inflation_pct: float) -> None:
     st.subheader(f"Bond — {bond.isin}")
     freq_txt = {1: "annual", 2: "semiannual", 4: "quarterly"}.get(bond.frequency, f"{bond.frequency}×/yr")
+    kind = "real" if bond.coupon_real else "nominal, fixed"
+    pay_txt = "paid once at maturity" if bond.coupon_at_maturity else freq_txt
     st.caption(f"Maturity {bond.maturity.isoformat()} · coupon {bond.coupon_pct:.2f}% "
-               f"({freq_txt}, real) · {bond.currency} · nominal €{bond.nominal:,.0f}")
+               f"({pay_txt}, {kind}) · {bond.currency} · nominal €{bond.nominal:,.0f}")
 
     ytm_r = bond.ytm_real()
     ytm_n = bond.ytm_nominal(inflation_pct)
@@ -1007,25 +1027,39 @@ def render_bond_view(bond, inflation_pct: float) -> None:
 
     b1, b2, b3, b4 = st.columns(4)
     b1.metric("Current yield", f"{bond.current_yield:.2f}%", help="Annual coupon ÷ market price.")
-    b2.metric("YTM real", f"{ytm_r*100:.2f}%" if ytm_r is not None else "—",
-              help="IRR of real coupons + redemption at 100, given the market price.")
-    b3.metric(f"YTM nominal (@{inflation_pct:.1f}%)", f"{ytm_n*100:.2f}%" if ytm_n is not None else "—",
-              help="Fisher approximation: real YTM + assumed inflation.")
+    if bond.coupon_real:
+        b2.metric("YTM real", f"{ytm_r*100:.2f}%" if ytm_r is not None else "—",
+                  help="IRR of real coupons + redemption at 100, given the market price.")
+        b3.metric(f"YTM nominal (@{inflation_pct:.1f}%)",
+                  f"{ytm_n*100:.2f}%" if ytm_n is not None else "—",
+                  help="Fisher approximation: real YTM + assumed inflation.")
+    else:
+        b2.metric("YTM nominal", f"{ytm_n*100:.2f}%" if ytm_n is not None else "—",
+                  help="IRR of fixed coupons + redemption at 100, given the market price.")
+        b3.metric("Years to maturity", f"{(bond.maturity - date.today()).days / 365.25:.1f}")
     b4.metric("Next coupon", bond.next_coupon.isoformat(),
-              help=f"{bond.coupon_pct / bond.frequency:.3f}% (real) per period")
+              help=(f"{bond.maturity_coupon():.3f} per €100 face, paid with the redemption"
+                    if bond.coupon_at_maturity
+                    else f"{bond.coupon_pct / bond.frequency:.3f}% ({kind}) per period"))
 
-    st.caption("Inflation-linked: coupons are quoted in **real** terms; principal is uplifted by "
-               "realized inflation at redemption. YTM real is the inflation-adjusted yield; "
-               "nominal ≈ real + assumed inflation (Fisher). Set the inflation assumption in the sidebar.")
+    if bond.coupon_real:
+        st.caption("Inflation-linked: coupons are quoted in **real** terms; principal is uplifted by "
+                   "realized inflation at redemption. YTM real is the inflation-adjusted yield; "
+                   "nominal ≈ real + assumed inflation (Fisher). Set the inflation assumption in the sidebar.")
+    else:
+        st.caption("Fixed-rate: coupons are **nominal**, so the YTM is already a nominal yield — "
+                   "the inflation assumption does not apply.")
 
-    st.markdown("##### Coupon schedule (real, per €100 face)")
+    coupon_col = "Coupon (real)" if bond.coupon_real else "Coupon"
+    st.markdown(f"##### Coupon schedule ({'real, ' if bond.coupon_real else ''}per €100 face)")
     sched = pd.DataFrame({"Date": [d.isoformat() for d in bond.coupon_dates()]})
-    sched["Coupon (real)"] = bond.coupon_pct / bond.frequency
+    sched[coupon_col] = (bond.maturity_coupon() if bond.coupon_at_maturity
+                         else bond.coupon_pct / bond.frequency)
     sched.loc[sched.index[-1], "Redemption"] = 100.0
     st.dataframe(
         sched, hide_index=True, use_container_width=True,
         column_config={
-            "Coupon (real)": st.column_config.NumberColumn(format="%.3f"),
+            coupon_col: st.column_config.NumberColumn(format="%.3f"),
             "Redemption": st.column_config.NumberColumn(format="%.0f"),
         },
         height=min(500, 38 * (len(sched) + 1)),
@@ -1033,11 +1067,11 @@ def render_bond_view(bond, inflation_pct: float) -> None:
 
 
 if IS_GENERAL:
-    render_general(tx_all, present_classes, bond)
+    render_general(tx_all, present_classes, bond_list)
     st.stop()
 
 if IS_BOND:
-    render_bond_view(bond, inflation_assumed)
+    render_bond_view(bond_list, inflation_assumed)
     st.stop()
 
 symbols = tuple(positions["symbol"].tolist())
