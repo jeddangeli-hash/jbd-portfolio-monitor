@@ -196,6 +196,9 @@ with st.sidebar:
                                        step=0.05, key=f"b_coupon_{_i}")
             b_bullet = st.checkbox("Cedola unica a scadenza",
                                    value=bool(_bd["coupon_at_maturity"]), key=f"b_bullet_{_i}")
+            b_lump = st.number_input("Cedola complessiva a scadenza (% nominale)",
+                                     value=float(_bd["lump_coupon_pct"]), step=0.1,
+                                     disabled=not b_bullet, key=f"b_lump_{_i}")
             b_freq = st.selectbox("Frequenza cedole/anno", [1, 2, 4],
                                   index=[1, 2, 4].index(int(_bd["frequency"])),
                                   key=f"b_freq_{_i}")
@@ -211,7 +214,8 @@ with st.sidebar:
             "isin": b_isin, "nominal": b_nominal, "price_load": b_load,
             "price_market": b_market, "coupon_pct": b_coupon, "frequency": b_freq,
             "accrued": b_accrued, "next_coupon": b_next, "maturity": b_mat,
-            "currency": "EUR", "coupon_real": b_real, "coupon_at_maturity": b_bullet})
+            "currency": "EUR", "coupon_real": b_real, "coupon_at_maturity": b_bullet,
+            "lump_coupon_pct": b_lump})
     if st.button("Salva BTP", icon=":material/save:", width="stretch"):
         bonds.save_bonds_data(BOND_JSON, _bond_inputs)
         st.success("BTP salvati.")
@@ -1038,7 +1042,7 @@ def _render_one_bond(bond: bonds.Bond, inflation_pct: float) -> None:
                   help="IRR of fixed coupons + redemption at 100, given the market price.")
         b3.metric("Years to maturity", f"{(bond.maturity - date.today()).days / 365.25:.1f}")
     b4.metric("Next coupon", bond.next_coupon.isoformat(),
-              help=(f"{bond.maturity_coupon():.3f} per €100 face, paid with the redemption"
+              help=(f"{bond.maturity_coupon():.2f} per €100 face, paid with the redemption"
                     if bond.coupon_at_maturity
                     else f"{bond.coupon_pct / bond.frequency:.3f}% ({kind}) per period"))
 

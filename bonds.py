@@ -43,8 +43,10 @@ class Bond:
     maturity: date          # redemption date
     currency: str = "EUR"
     coupon_real: bool = True  # False for a fixed-rate (nominal-coupon) BTP
-    # True when all coupons accrue and are paid in one lump with the redemption
+    # True when all interest is paid in one lump with the redemption; the lump is
+    # lump_coupon_pct of nominal (coupon_pct is then only the quoted per-year rate)
     coupon_at_maturity: bool = False
+    lump_coupon_pct: float = 0.0
 
     # ----- clean capital values (accrued excluded, by design) -----
     @property
@@ -69,15 +71,9 @@ class Bond:
         return (self.coupon_pct / self.price_market * 100.0) if self.price_market else 0.0
 
     # ----- cashflows & yields (per 100 face) -----
-    def maturity_coupon(self, valuation: date | None = None) -> float:
-        """Lump-sum coupon per 100 face for a coupon_at_maturity bond.
-
-        What is already accrued (rateo) plus simple accrual at the annual rate from
-        the valuation date to maturity — derived so no issue date is needed.
-        """
-        val = valuation or date.today()
-        accrued_pct = self.accrued / self.nominal * 100.0
-        return accrued_pct + self.coupon_pct * max((self.maturity - val).days, 0) / 365.0
+    def maturity_coupon(self) -> float:
+        """Lump-sum coupon per 100 face paid at maturity (coupon_at_maturity bonds)."""
+        return self.lump_coupon_pct
 
     def coupon_dates(self) -> list[date]:
         """All remaining coupon dates from next_coupon through maturity inclusive."""
@@ -104,7 +100,7 @@ class Bond:
             # The buyer pays the rateo on top of the clean price and gets it back
             # inside the lump coupon, so the outflow is the dirty price.
             dirty = self.price_market + self.accrued / self.nominal * 100.0
-            return pf.xirr([(val, -dirty), (self.maturity, 100.0 + self.maturity_coupon(val))])
+            return pf.xirr([(val, -dirty), (self.maturity, 100.0 + self.maturity_coupon())])
         coupon = self.coupon_pct / self.frequency  # per period, per 100 face
         cf: list[tuple[date, float]] = [(val, -self.price_market)]
         for d in self.coupon_dates():
@@ -141,6 +137,7 @@ DEFAULT_BONDS = [
         "currency": "EUR",
         "coupon_real": True,
         "coupon_at_maturity": False,
+        "lump_coupon_pct": 0.0,
     },
     {  # BTP-27OT31 VAL, bought 2026-10-27. Fixed-rate (nominal) coupon, paid once at maturity.
         "isin": "IT0005735227",
@@ -155,6 +152,7 @@ DEFAULT_BONDS = [
         "currency": "EUR",
         "coupon_real": False,
         "coupon_at_maturity": True,
+        "lump_coupon_pct": 22.70,  # 4.54% × 5 years, gross, single payment
     },
 ]
 
@@ -175,6 +173,7 @@ def bond_from_dict(d: dict) -> Bond:
         currency=str(d.get("currency", "EUR")),
         coupon_real=bool(d.get("coupon_real", True)),
         coupon_at_maturity=bool(d.get("coupon_at_maturity", False)),
+        lump_coupon_pct=float(d.get("lump_coupon_pct", 0.0)),
     )
 
 

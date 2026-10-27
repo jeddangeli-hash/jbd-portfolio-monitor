@@ -20,18 +20,16 @@ def test_fixed_rate_ytm_is_nominal_and_ignores_inflation():
     assert b.ytm_nominal(2.0, VAL) == pytest.approx(b.ytm_nominal(5.0, VAL))
 
 
-def test_bullet_coupon_pays_once_at_maturity_with_accrual():
+def test_bullet_coupon_is_the_fixed_lump_paid_once_at_maturity():
     b = _bond()
     assert b.coupon_dates() == [b.maturity]
-    # accrued 22.07/100k = 0.02207 + 4.54% × 5 years (1826 days / 365)
-    assert b.maturity_coupon(VAL) == pytest.approx(0.02207 + 4.54 * 1826 / 365)
+    assert b.maturity_coupon() == pytest.approx(22.70)
 
 
-def test_bullet_ytm_matches_closed_form():
-    b = _bond()
-    dirty = 100.13 + 0.02207
-    expected = ((100.0 + b.maturity_coupon(VAL)) / dirty) ** (365 / 1826) - 1
-    assert b.ytm_nominal(2.0, VAL) == pytest.approx(expected, abs=1e-6)
+def test_bullet_ytm_at_par_matches_the_issuer_sheet():
+    # Sheet: 22.70% lump over 5 years bought at 100 ≈ 4.18% compounded.
+    b = _bond(price_market=100.0, accrued=0.0)
+    assert b.ytm_nominal(2.0, date(2026, 10, 27)) == pytest.approx(0.0418, abs=1e-4)
 
 
 def test_real_coupon_ytm_gets_the_fisher_inflation_add_on():
