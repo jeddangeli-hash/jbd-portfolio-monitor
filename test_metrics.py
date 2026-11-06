@@ -241,3 +241,11 @@ def test_dietz_window_counts_inflows_as_capital():
     r = mt.dietz_curve(values, cash, base=idx[1])
     assert r.iloc[0] == 0.0
     assert r.iloc[-1] == pytest.approx(21 / 210)
+
+
+def test_dietz_detail_reports_capital_and_start():
+    d0, d1 = pd.Timestamp("2025-09-09"), pd.Timestamp("2025-10-09")
+    # no trades after the first buy: +2% on 1,000 is +2%, capital 1,000
+    r, cap, start = mt.dietz_detail([(d0, 1_000.0)], d1, 20.0)
+    assert r == pytest.approx(0.02) and cap == pytest.approx(1_000.0) and start == d0
+    assert mt.dietz_detail([], d1, 0.0) == (None, None, None)

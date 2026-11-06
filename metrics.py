@@ -340,16 +340,25 @@ def dietz_curve(values: pd.Series, cashflows: pd.Series, base=None) -> pd.Series
     return r
 
 
-def dietz_from_flows(flows, end, pnl: float) -> float | None:
-    """Since-inception Modified Dietz from dated flows, without a price history.
+def dietz_detail(flows, end, pnl: float):
+    """Since-inception Modified Dietz from dated flows, with its parts.
 
     flows: iterable of (date, amount) with amount > 0 for money in (a buy) and
     < 0 for money out (a sale). end: valuation date. pnl: total P&L at `end`.
+    Returns (return as fraction or None, average capital, first trade date);
+    (None, None, None) when there are no flows.
     """
     flows = [(pd.Timestamp(d).normalize(), float(a)) for d, a in flows if a]
     if not flows:
-        return None
-    t0 = min(d for d, _ in flows) - pd.Timedelta(days=1)
+        return None, None, None
+    first = min(d for d, _ in flows)
+    t0 = first - pd.Timedelta(days=1)
     D = max((pd.Timestamp(end).normalize() - t0).days, 1)
     capital = sum(a * (D - (d - t0).days + 1) / D for d, a in flows)
-    return pnl / capital if capital > 1e-9 else None
+    ret = pnl / capital if capital > 1e-9 else None
+    return ret, capital, first
+
+
+def dietz_from_flows(flows, end, pnl: float) -> float | None:
+    """Since-inception Modified Dietz return (fraction) from dated flows."""
+    return dietz_detail(flows, end, pnl)[0]
