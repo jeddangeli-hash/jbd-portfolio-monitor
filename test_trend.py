@@ -36,7 +36,8 @@ def test_period_curve_inception_is_pnl_over_net_cash():
     values = pd.Series([100.0, 120.0, 90.0], index=idx)
     cash = pd.Series([100.0, 0.0, -40.0], index=idx)               # sold 40 on day 3
     r = trend.period_curve(values, cash, base=None)
-    assert r.iloc[-1] == pytest.approx((90 - 60) / 60)
+    # Modified Dietz: the 40 sold on day 3 was invested 1 of 3 days → capital 86.67
+    assert r.iloc[-1] == pytest.approx((90 - 60) / (100 - 40 * 1 / 3))
 
 
 def test_intraday_curve_values_current_holdings():

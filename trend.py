@@ -6,12 +6,15 @@ Two kinds of window:
   bars; the return is value / value at the window's base bar − 1.
 * Daily (1S … Inizio): the value series is rebuilt from transactions, so buys
   and sells inside the window are cash, not performance. The return at day t is
-  (P&L earned since the base day) ÷ (value at the base day + net cash added
-  since), which for "Inizio" reduces to the familiar total P&L ÷ net cash.
+  Modified Dietz: P&L earned since the base day ÷ average capital at work, each
+  buy and sale weighted by the days it was invested ("Inizio" = since the first
+  trade).
 """
 from __future__ import annotations
 
 import pandas as pd
+
+import metrics as mt
 
 PERIODS = ["1G", "2G", "1S", "1M", "6M", "YTD", "1A", "Inizio"]
 PERIOD_LABELS = {"1G": "1G", "2G": "2G", "1S": "Settimana", "1M": "1M", "6M": "6M",
@@ -47,20 +50,14 @@ def daily_base(period: str, index: pd.DatetimeIndex) -> pd.Timestamp | None:
 
 def period_curve(values: pd.Series, cashflows: pd.Series,
                  base: pd.Timestamp | None) -> pd.Series:
-    """Simple return (fraction) through the window; first point is the base at 0."""
-    if values.empty:
-        return pd.Series(dtype=float)
-    if base is None or base not in values.index:
-        cum = cashflows.cumsum()
-        r = (values - cum) / cum.where(cum > 1e-9)
-        return r.dropna()
-    v0 = float(values.loc[base])
-    win = values.index > base
-    cf_in = cashflows[win].cumsum()
-    pnl = values[win] - v0 - cf_in
-    capital = v0 + cf_in.clip(lower=0.0)
-    r = pnl / capital.where(capital > 1e-9)
-    return pd.concat([pd.Series([0.0], index=[base]), r]).dropna()
+    """Modified Dietz return (fraction) through the window; first point is 0.
+
+    P&L since the base ÷ average capital at work, each buy/sale weighted by the
+    days it was invested (see metrics.dietz_curve). base None = since inception.
+    """
+    if base is not None and base not in values.index:
+        base = None
+    return mt.dietz_curve(values, cashflows, base)
 
 
 def intraday_window(bars: pd.DataFrame, period: str,

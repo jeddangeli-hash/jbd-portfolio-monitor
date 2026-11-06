@@ -210,3 +210,34 @@ def test_symbol_held_in_two_classes_does_not_merge():
     assert sum(parts[1:], parts[0]).tolist() == pytest.approx(agg.tolist())
     # 3 BTC bought at 50k, marked at 91,859.
     assert agg.iloc[-1] == pytest.approx(3 * 91_859.0 - 3 * 50_000.0)
+
+
+# --------------------------------------------------------------------------
+# Modified Dietz: selling at a gain must not inflate the return the way
+# P&L ÷ net cash did (+200% for a position that really made +50%).
+# --------------------------------------------------------------------------
+
+def test_dietz_does_not_blow_up_after_selling_at_a_gain():
+    idx = pd.date_range("2026-01-01", periods=201, freq="D")
+    values = pd.Series(15_000.0, index=idx)
+    values.iloc[0] = 10_000.0
+    values.iloc[100:] = 7_500.0                        # half sold on day 101
+    cash = pd.Series(0.0, index=idx)
+    cash.iloc[0] = 10_000.0                            # buy
+    cash.iloc[100] = -7_500.0                          # sale
+    r = mt.dietz_curve(values, cash).iloc[-1]
+    pnl = 7_500.0 - (10_000.0 - 7_500.0)               # 5,000
+    net_cash_return = pnl / 2_500.0                    # the old +200%
+    assert net_cash_return == pytest.approx(2.0)
+    assert 0.7 < r < 0.85                              # ≈ +80%, money-weighted
+    assert mt.dietz_from_flows([(idx[0], 10_000.0), (idx[100], -7_500.0)],
+                               idx[-1], pnl) == pytest.approx(r)
+
+
+def test_dietz_window_counts_inflows_as_capital():
+    idx = pd.date_range("2026-01-01", periods=4)
+    values = pd.Series([100.0, 110.0, 210.0, 231.0], index=idx)   # +100 bought on day 3
+    cash = pd.Series([100.0, 0.0, 100.0, 0.0], index=idx)
+    r = mt.dietz_curve(values, cash, base=idx[1])
+    assert r.iloc[0] == 0.0
+    assert r.iloc[-1] == pytest.approx(21 / 210)
