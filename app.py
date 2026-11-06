@@ -935,6 +935,12 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
         deployed_eur += sum(b.load_value for b in bond_list) / bond_div  # single buys, no sells
     net_cash_in_eur = deployed_eur - returned_eur
     simple_on_net = (total_pnl_eur / net_cash_in_eur * 100.0) if net_cash_in_eur > 0 else 0.0
+    # Unrealized % on the FIFO cost of the lots still held; realized % on the cost
+    # of the shares sold (long-only: sell proceeds − realized P&L).
+    open_cost_eur = float(oc["invested_eur"].sum())
+    unreal_pct = total_unreal_eur / open_cost_eur * 100.0 if open_cost_eur > 1e-9 else None
+    sold_cost_eur = returned_eur - total_real_eur
+    real_pct = total_real_eur / sold_cost_eur * 100.0 if sold_cost_eur > 1e-9 else None
 
     # 5) EUR XIRR: convert each cashflow by its symbol's currency (today's rate),
     #    drop tx in unsupported currencies, pin the final EUR market value.
@@ -972,9 +978,13 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
                f"{int(open_mask.sum())} posizioni aperte", hero=True),
         ui.kpi("Total P&L", ui.money(total_pnl_eur), ui.pct(simple_on_net) + " su capitale netto",
                positive=total_pnl_eur >= 0),
-        ui.kpi("Unrealized P&L", ui.money(total_unreal_eur), "posizioni aperte",
+        ui.kpi("Unrealized P&L", ui.money(total_unreal_eur),
+               (ui.pct(unreal_pct) + " sul costo dei titoli in portafoglio")
+               if unreal_pct is not None else "posizioni aperte",
                positive=total_unreal_eur >= 0),
-        ui.kpi("Realized P&L", ui.money(total_real_eur), "posizioni chiuse",
+        ui.kpi("Realized P&L", ui.money(total_real_eur),
+               (ui.pct(real_pct) + " sul costo dei titoli venduti")
+               if real_pct is not None else "posizioni chiuse",
                positive=total_real_eur >= 0),
         ui.kpi("Simple return", ui.pct(simple_on_net),
                "P&L ÷ capitale netto investito", positive=simple_on_net >= 0),
