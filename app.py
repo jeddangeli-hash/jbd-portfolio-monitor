@@ -573,6 +573,23 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
                                * q).sum(axis=1, min_count=1).dropna()
                         pnl_by[cls] = float(v_c.iloc[-1] - v_c[v_c.index <= c_base].iloc[-1])
                 sym_prices = bars
+                if period == "1G":
+                    # Like Yahoo's day change and the class views' "Day change": from
+                    # the official previous close, ending on the live quotes.
+                    prev_q = {s: v["prev_close"] / sym_div[s] for s, v in quotes_g.items()
+                              if sym_div.get(s) and v.get("prev_close")}
+                    live_q = {s: v["price"] / sym_div[s] for s, v in quotes_g.items()
+                              if sym_div.get(s) and v.get("price")}
+                    c_tot, p_tot = trend.day_curve(bars, qty_all, prev_q, live_q, start)
+                    if len(c_tot):
+                        curves = {"total": c_tot}
+                        pnl_by = {"total": p_tot}
+                        base_ts = c_tot.index[0]
+                        for cls in picked:
+                            q_cls = pos_f[pos_f["asset_class"] == cls].groupby("symbol")["qty"].sum()
+                            c_c, p_c = trend.day_curve(bars, q_cls, prev_q, live_q, start)
+                            if len(c_c):
+                                curves[cls], pnl_by[cls] = c_c, p_c
         if "total" not in curves:
             intraday = False
             st.caption("Prezzi intraday non disponibili: uso le chiusure giornaliere.")
@@ -716,6 +733,8 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
             spark_base = base_ts
             per_pnl = _symbol_period_pnl(tx_f[(tx_f["symbol"] == s) & (tx_f["asset_class"] == cls)],
                                          prices_s, float(r.qty), base_ts, intraday)
+            if period == "1G" and day is not None:
+                per, per_pnl = day, day_pnl  # 1G is the day change, same as Yahoo
         rsi = mt.compute_rsi(hist_all[s], 14) if s in hist_all.columns else None
         e = ext.get(s)
         row = {
@@ -967,6 +986,20 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
                         if c != BASE and c in divisor)
     if fx_txt:
         st.caption(f"💶 FX today: {fx_txt}")
+    with st.expander("Come leggere questi numeri (e perché differiscono da Yahoo)"):
+        st.markdown(
+            "- **Unrealized P&L** = valore attuale − costo FIFO dei lotti ancora aperti: è il "
+            "numero che Yahoo chiama *Total gain*.\n"
+            "- **Realized P&L** = guadagni/perdite già incassati sulle vendite (FIFO). Yahoo non "
+            "lo somma al *Total gain*.\n"
+            "- **Total P&L** = Unrealized + Realized, cioè tutto quello che hai guadagnato da "
+            "quando hai iniziato.\n"
+            "- **Simple return** = Total P&L ÷ capitale netto versato (acquisti − vendite). "
+            "Yahoo invece mostra Unrealized ÷ costo dei lotti aperti.\n"
+            "- **Andamento 1G** e **Giorno %** partono dalla chiusura ufficiale precedente, come "
+            "il *Day gain* di Yahoo; gli altri periodi contano acquisti e vendite come cassa.\n"
+            f"- Gli importi in {BASE} usano il cambio di oggi anche per costi e vendite passati: "
+            "per confrontarli con Yahoo (in $) scegli **USD** nella sidebar.")
 
     st.divider()
 
@@ -2609,8 +2642,11 @@ with tab_daily:
         else:
             daily_mode = st.radio(
                 "Return measure",
-                ["Simple return on net cash", "TWR (time-weighted)"],
+                ["% sul valore del giorno prima (come Yahoo)", "Simple return on net cash"],
                 horizontal=True, key="daily_mode",
+                help="Il primo divide il P&L del giorno per il valore del portafoglio alla "
+                     "chiusura precedente, come Yahoo e l'Andamento in Home. Il secondo lo "
+                     "divide per il capitale netto versato (acquisti − vendite).",
             )
             daily_dol = mt.daily_dollar_change(value_series, cf_series)
             daily_twr = mt.daily_pct_change(value_series, cf_series)
@@ -2621,7 +2657,7 @@ with tab_daily:
             daily_simple = daily_simple.where(cum_dep_daily > 1e-6, 0.0).fillna(0.0)
 
             daily_pct = daily_simple if daily_mode.startswith("Simple") else daily_twr
-            pct_label = "Simple % (on net cash)" if daily_mode.startswith("Simple") else "TWR %"
+            pct_label = "Simple % (on net cash)" if daily_mode.startswith("Simple") else "% sul valore"
 
             n_days = st.slider("Show last N trading days", 5, 90, 30)
             idx = daily_pct.index[-n_days:]
@@ -2644,7 +2680,7 @@ with tab_daily:
                 window_label = f"{n_days}d Δ simple return"
             else:
                 window_growth = (1.0 + daily_twr.loc[idx]).prod() - 1.0
-                window_label = f"{n_days}d TWR"
+                window_label = f"{n_days}d rendimento composto"
             best = df_daily.loc[df_daily["pct"].idxmax()]
             worst = df_daily.loc[df_daily["pct"].idxmin()]
 
