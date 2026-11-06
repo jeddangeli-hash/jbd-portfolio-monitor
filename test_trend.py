@@ -124,3 +124,16 @@ def test_earnings_soon_today_and_next_business_day():
         ("MELI", "Oggi", "Orario n.d."),
         ("PFE", "Lunedì", "Pre-market"),
     ]
+
+
+def test_day_curve_ends_on_quote_day_change():
+    ts = pd.date_range("2026-11-06 14:00", periods=3, freq="15min", tz="UTC")
+    bars = pd.DataFrame({"A": [101.0, 102.0, 103.0]}, index=ts)      # B has no bars today
+    qty = pd.Series({"A": 10.0, "B": 5.0})
+    prev = {"A": 100.0, "B": 20.0}
+    live = {"A": 103.5, "B": 19.0}
+    curve, pnl = trend.day_curve(bars, qty, prev, live, ts[0])
+    assert pnl == pytest.approx(10 * 3.5 + 5 * -1.0)                 # Σ qty·(live − prev)
+    assert curve.iloc[0] == 0.0
+    assert curve.iloc[-1] == pytest.approx(pnl / (10 * 100 + 5 * 20))
+    assert curve.iloc[1] == pytest.approx((10 * 101 + 5 * 20) / 1100 - 1)   # B flat at prev close

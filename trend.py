@@ -222,3 +222,32 @@ def earnings_soon(dates: dict, now: pd.Timestamp) -> list[dict]:
             out.append({"symbol": sym, "day": day, "date": d, "session": session, "ts": ts})
     order = {"Pre-market": 0, "In seduta": 1, "After-market": 2, "Orario n.d.": 3}
     return sorted(out, key=lambda e: (e["date"], order[e["session"]], e["symbol"]))
+
+
+def day_curve(bars: pd.DataFrame, qty: pd.Series, prev_close: dict, live: dict,
+              start: pd.Timestamp) -> tuple[pd.Series, float | None]:
+    """1G measured like Yahoo's day change: from the official previous close.
+
+    Value at the previous close (Σ qty·prev_close) is the base; the intraday
+    bars give the path, and the last point is pinned to the live quotes so the
+    curve ends exactly on Σ qty·(price − prev_close) ÷ Σ qty·prev_close.
+    A symbol without bars stays flat at its previous close. Returns
+    (curve as fraction, P&L); empty / None when nothing is priced.
+    """
+    syms = [s for s in qty.index
+            if qty[s] > 0 and prev_close.get(s) and live.get(s) is not None]
+    if not syms:
+        return pd.Series(dtype=float), None
+    q = qty[syms].astype(float)
+    v0 = float(sum(q[s] * prev_close[s] for s in syms))
+    v1 = float(sum(q[s] * live[s] for s in syms))
+    if v0 <= 0:
+        return pd.Series(dtype=float), None
+    idx = bars.index[bars.index >= start] if len(bars) else pd.DatetimeIndex([])
+    path = pd.Series(0.0, index=idx)
+    for s in syms:
+        col = bars[s].ffill().reindex(idx) if s in bars.columns else pd.Series(index=idx, dtype=float)
+        path = path + q[s] * col.fillna(prev_close[s])
+    curve = pd.concat([pd.Series([0.0], index=[start - pd.Timedelta(minutes=1)]), path / v0 - 1.0])
+    curve.iloc[-1] = v1 / v0 - 1.0
+    return curve, v1 - v0
