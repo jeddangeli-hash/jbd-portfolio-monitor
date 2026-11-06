@@ -468,6 +468,13 @@ def get_extended(symbols: tuple[str, ...]) -> pd.DataFrame:
     return pr.fetch_intraday_bulk(list(symbols), period="5d", interval="5m", prepost=True)
 
 
+def _tx_flows(tx_df: pd.DataFrame) -> list[tuple]:
+    """(trade_date, money in) per trade: + for a buy, − for a sale (tx prices as given)."""
+    sign = tx_df["side"].map({"BUY": 1.0, "SELL": -1.0}).fillna(0.0)
+    amt = tx_df["qty"].astype(float) * tx_df["price"].astype(float) * sign
+    return list(zip(tx_df["trade_date"], amt))
+
+
 def _eur_prices(frame: pd.DataFrame, syms, sym_div: dict) -> pd.DataFrame:
     cols = [s for s in syms if s in frame.columns and sym_div.get(s)]
     return pd.DataFrame({s: frame[s] / sym_div[s] for s in cols}, index=frame.index)
@@ -644,7 +651,9 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
     bench_ret = float(bench.iloc[-1]) if len(bench) else None
     ui.kpi_grid([
         ui.kpi(f"Rendimento · {trend.PERIOD_LABELS[period]}", ui.pct(ret * 100),
-               "simple return", positive=ret >= 0, hero=True),
+               ("sulla chiusura precedente" if period == "1G"
+                else "sul valore iniziale" if period in trend.INTRADAY else "rendimento (Dietz)"),
+               positive=ret >= 0, hero=True),
         ui.kpi("P&L nel periodo", ui.money(pnl), f"in {BASE}", positive=pnl >= 0),
         ui.kpi("Valore attuale", ui.money(float(mv_cls.sum())),
                f"{pos_f['symbol'].nunique()} titoli"),
@@ -918,7 +927,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
     bond_mv_eur = sum(b.market_value for b in bond_list) / bond_div if bond_in else 0.0
     csv_mv_eur = total_mv_eur - bond_mv_eur
 
-    # EUR cashflow basis — single source of truth for "simple return on net cash",
+    # EUR cashflow basis — single source of truth for the headline return (Dietz),
     # shared by the headline KPI (below) and the Return decomposition further down,
     # so they always tell the same story. tx prices scaled to EUR by each symbol's
     # divisor; tx in unconvertible currencies are excluded (consistent with totals).
@@ -933,8 +942,20 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
     returned_eur = float((sell_eur["qty"] * sell_eur["price"]).sum())
     if bond_in:
         deployed_eur += sum(b.load_value for b in bond_list) / bond_div  # single buys, no sells
-    net_cash_in_eur = deployed_eur - returned_eur
-    simple_on_net = (total_pnl_eur / net_cash_in_eur * 100.0) if net_cash_in_eur > 0 else 0.0
+    # Headline return: Modified Dietz since the first trade — total P&L ÷ average
+    # capital at work. (P&L ÷ net cash, the old measure, blows up after selling at
+    # a gain.) BTPs carry no purchase date, so they count as invested from day one.
+    flows_g = _tx_flows(tx_eur)
+    if bond_in and len(tx_eur):
+        flows_g.append((tx_eur["trade_date"].min(), sum(b.load_value for b in bond_list) / bond_div))
+    _dz = mt.dietz_from_flows(flows_g, today_, total_pnl_eur)
+    dietz_ret = _dz * 100.0 if _dz is not None else None
+    # Unrealized % on the FIFO cost of the lots still held; realized % on the cost
+    # of the shares sold (long-only: sell proceeds − realized P&L).
+    open_cost_eur = float(oc["invested_eur"].sum())
+    unreal_pct = total_unreal_eur / open_cost_eur * 100.0 if open_cost_eur > 1e-9 else None
+    sold_cost_eur = returned_eur - total_real_eur
+    real_pct = total_real_eur / sold_cost_eur * 100.0 if sold_cost_eur > 1e-9 else None
 
     # 5) EUR XIRR: convert each cashflow by its symbol's currency (today's rate),
     #    drop tx in unsupported currencies, pin the final EUR market value.
@@ -970,14 +991,20 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
     ui.kpi_grid([
         ui.kpi("Market value", ui.money(total_mv_eur),
                f"{int(open_mask.sum())} posizioni aperte", hero=True),
-        ui.kpi("Total P&L", ui.money(total_pnl_eur), ui.pct(simple_on_net) + " su capitale netto",
+        ui.kpi("Total P&L", ui.money(total_pnl_eur),
+               (ui.pct(dietz_ret) + " rendimento") if dietz_ret is not None else "",
                positive=total_pnl_eur >= 0),
-        ui.kpi("Unrealized P&L", ui.money(total_unreal_eur), "posizioni aperte",
+        ui.kpi("Unrealized P&L", ui.money(total_unreal_eur),
+               (ui.pct(unreal_pct) + " sul costo dei titoli in portafoglio")
+               if unreal_pct is not None else "posizioni aperte",
                positive=total_unreal_eur >= 0),
-        ui.kpi("Realized P&L", ui.money(total_real_eur), "posizioni chiuse",
+        ui.kpi("Realized P&L", ui.money(total_real_eur),
+               (ui.pct(real_pct) + " sul costo dei titoli venduti")
+               if real_pct is not None else "posizioni chiuse",
                positive=total_real_eur >= 0),
-        ui.kpi("Simple return", ui.pct(simple_on_net),
-               "P&L ÷ capitale netto investito", positive=simple_on_net >= 0),
+        ui.kpi("Rendimento", ui.pct(dietz_ret) if dietz_ret is not None else "n/a",
+               "P&L ÷ capitale medio investito (Dietz)",
+               positive=(dietz_ret >= 0) if dietz_ret is not None else None),
         ui.kpi("XIRR (MWR)", ui.pct(agg_xirr * 100) if agg_xirr else "n/a",
                "money-weighted, annuo",
                positive=(agg_xirr >= 0) if agg_xirr is not None else None),
@@ -994,8 +1021,10 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
             "lo somma al *Total gain*.\n"
             "- **Total P&L** = Unrealized + Realized, cioè tutto quello che hai guadagnato da "
             "quando hai iniziato.\n"
-            "- **Simple return** = Total P&L ÷ capitale netto versato (acquisti − vendite). "
-            "Yahoo invece mostra Unrealized ÷ costo dei lotti aperti.\n"
+            "- **Rendimento** = Total P&L ÷ capitale medio investito (*Modified Dietz*): ogni "
+            "acquisto e vendita pesa per i giorni in cui i soldi sono rimasti investiti, quindi "
+            "vendere in guadagno non gonfia la %. Yahoo invece mostra Unrealized ÷ costo dei "
+            "lotti aperti.\n"
             "- **Andamento 1G** e **Giorno %** partono dalla chiusura ufficiale precedente, come "
             "il *Day gain* di Yahoo; gli altri periodi contano acquisti e vendite come cassa.\n"
             f"- Gli importi in {BASE} usano il cambio di oggi anche per costi e vendite passati: "
@@ -1030,21 +1059,18 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
                        .dropna(subset=["currency"])
                        .groupby("currency")["market_value"].sum())
             nat_str = " · ".join(f"{cur} {v:,.0f}" for cur, v in natives.items()) or "—"
-            # % return for the class = class total P&L EUR / class net cash invested EUR,
-            # same simple-return formula as the headline KPI. The bond has no tx, so
-            # its net cash is its load value (single buy, no sells).
-            if cls == "bond" and bond_in:
-                cls_net = sum(b.load_value for b in bond_list) / bond_div
-            else:
-                cls_tx = tx_eur[tx_eur["asset_class"] == cls]
-                cls_buy = cls_tx[cls_tx["side"] == "BUY"]
-                cls_sell = cls_tx[cls_tx["side"] == "SELL"]
-                cls_net = (float((cls_buy["qty"] * cls_buy["price"]).sum())
-                           - float((cls_sell["qty"] * cls_sell["price"]).sum()))
+            # % return for the class: Modified Dietz since its first trade, same
+            # measure as the headline. The bond has no tx: one buy at load value.
             cls_unreal = float(oc.loc[oc["asset_class"] == cls, "unrealized_pnl_eur"].sum())
             cls_real = float(all_pos.loc[convertible & (all_pos["asset_class"] == cls),
                                          "realized_pnl_eur"].sum())
-            cls_ret = ((cls_unreal + cls_real) / cls_net * 100.0) if cls_net > 0 else None
+            if cls == "bond" and bond_in:
+                cls_load = sum(b.load_value for b in bond_list) / bond_div
+                cls_ret = (cls_unreal + cls_real) / cls_load * 100.0 if cls_load > 0 else None
+            else:
+                _r = mt.dietz_from_flows(_tx_flows(tx_eur[tx_eur["asset_class"] == cls]),
+                                         today_, cls_unreal + cls_real)
+                cls_ret = _r * 100.0 if _r is not None else None
             rows.append({"Class": ASSET_LABELS[cls], f"Market value ({C})": eur_v,
                          "% return": cls_ret, "Native": nat_str})
         st.dataframe(
@@ -1158,8 +1184,8 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
         st.caption("Different methods answer different questions — all 'correct', "
                    "measuring different things.")
         twr_itd = float(twr_g.iloc[-1] - 1) if len(twr_g) >= 2 else 0.0
-        # deployed_eur / returned_eur / net_cash_in_eur / simple_on_net are computed
-        # once above (shared with the headline KPI). Only simple_on_deployed is local.
+        # deployed_eur / dietz_ret are computed once above (shared with the
+        # headline KPI). Only simple_on_deployed is local.
         simple_on_deployed = (total_pnl_eur / deployed_eur * 100.0) if deployed_eur > 0 else 0.0
 
         rd1, rd2, rd3, rd4 = st.columns(4)
@@ -1169,8 +1195,10 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
         rd2.metric("XIRR (money-weighted, ann.)",
                    f"{agg_xirr*100:.2f}%" if agg_xirr else "—",
                    help=f"Annualized return on actual {BASE} cashflows, time-discounted.")
-        rd3.metric("Simple return on net cash", f"{simple_on_net:+.2f}%",
-                   help=f"Total P&L ÷ net cash invested (deployed − returned), in {BASE}.")
+        rd3.metric("Rendimento (Modified Dietz)",
+                   f"{dietz_ret:+.2f}%" if dietz_ret is not None else "—",
+                   help=f"Total P&L ÷ capitale medio investito, in {BASE}: ogni acquisto e "
+                        "vendita pesa per i giorni in cui i soldi sono rimasti investiti.")
         rd4.metric("Simple return on deployed", f"{simple_on_deployed:+.2f}%",
                    help=f"Total P&L ÷ gross capital deployed (all buys), in {BASE}.")
 
@@ -1203,16 +1231,13 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
         # Portfolio return curve vs benchmark — toggleable (unique key!)
         chart_mode_g = st.radio(
             "Return measure for chart",
-            ["Simple return on net cash", "TWR (time-weighted)"],
+            ["Rendimento (Modified Dietz)", "TWR (time-weighted)"],
             horizontal=True, key="gen_chart_mode",
         )
-        cum_deposits_curve = cf_series_g.cumsum()
-        with np.errstate(divide="ignore", invalid="ignore"):
-            simple_curve = (value_series_g - cum_deposits_curve) / cum_deposits_curve
-        simple_curve = simple_curve.where(cum_deposits_curve > 1e-6)
-        # Same rebase as the per-class tab when history starts after the first trade.
-        if len(tx_eur) and tx_eur["trade_date"].min() < value_series_g.index[0]:
-            simple_curve = trend.period_curve(value_series_g, cf_series_g, value_series_g.index[0])
+        # Rebased to the window's first day when history starts after the first trade.
+        _pre = len(tx_eur) and tx_eur["trade_date"].min() < value_series_g.index[0]
+        simple_curve = mt.dietz_curve(value_series_g, cf_series_g,
+                                      value_series_g.index[0] if _pre else None)
 
         if chart_mode_g.startswith("TWR"):
             port_y = (twr_g - 1) * 100
@@ -1220,8 +1245,8 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
             sub = f"TWR vs {benchmark}" if benchmark != "None" else "TWR"
         else:
             port_y = simple_curve * 100
-            port_label = "Portfolio (simple return on net cash)"
-            sub = f"Simple return vs {benchmark}" if benchmark != "None" else "Simple return"
+            port_label = "Portfolio (rendimento, Modified Dietz)"
+            sub = f"Rendimento vs {benchmark}" if benchmark != "None" else "Rendimento"
 
         st.subheader(sub)
         fig = go.Figure()
@@ -1595,7 +1620,7 @@ if _other_ccy:
 total_pnl_all = total_unrealized + total_realized
 
 # Two extra return measures for the Total P&L card (per-class, native currency):
-#  (a) Simple return on net cash — same formula as the per-class Performance tab.
+#  (a) Rendimento, Modified Dietz — same number as the per-class Performance tab.
 #  (b) Realized return — realized P&L ÷ FIFO cost of the SOLD shares. For a
 #      long-only book that cost equals (sell proceeds − realized), so no extra
 #      lot-walking is needed. (Uncovered short sells would break this identity;
@@ -1605,7 +1630,9 @@ _sell_o = tx[tx["side"] == "SELL"]
 _deployed_o = float((_buy_o["qty"] * _buy_o["price"]).sum())
 _returned_o = float((_sell_o["qty"] * _sell_o["price"]).sum())
 _net_cash_o = _deployed_o - _returned_o
-simple_on_net_o = (total_pnl_all / _net_cash_o * 100.0) if _net_cash_o > 1e-9 else None
+# Headline return: Modified Dietz since the first trade (see the Generale view).
+_dz_o = mt.dietz_from_flows(_tx_flows(tx), today, total_pnl_all)
+simple_on_net_o = _dz_o * 100.0 if _dz_o is not None else None
 _cost_of_sold_o = _returned_o - total_realized
 realized_ret_o = (total_realized / _cost_of_sold_o * 100.0) if _cost_of_sold_o > 1e-9 else None
 _son = f"{simple_on_net_o:+.2f}%" if simple_on_net_o is not None else "—"
@@ -1621,7 +1648,7 @@ ui.kpi_grid([
     ui.kpi("Realized P&L", ui.money(total_realized, CS),
            f"Realized {_rr}" if realized_ret_o is not None else "da lotti chiusi",
            positive=(realized_ret_o >= 0) if realized_ret_o is not None else None),
-    ui.kpi("Total P&L", ui.money(total_pnl_all, CS), f"Simple/net cash {_son}",
+    ui.kpi("Total P&L", ui.money(total_pnl_all, CS), f"{_son} rendimento",
            positive=(simple_on_net_o >= 0) if simple_on_net_o is not None else None),
     ui.kpi("XIRR (MWR)", ui.pct(port_xirr * 100) if port_xirr else "n/a",
            "money-weighted, annuo", positive=(port_xirr or 0) >= 0),
@@ -2435,7 +2462,6 @@ with tab_perf:
             total_returned_p = float((sell_tx_p["qty"] * sell_tx_p["price"]).sum())
             net_cash_in_p = total_deployed_p - total_returned_p
             total_pnl_p = total_unrealized + total_realized
-            simple_on_net = (total_pnl_p / net_cash_in_p * 100.0) if net_cash_in_p > 0 else 0.0
             simple_on_deployed = (total_pnl_p / total_deployed_p * 100.0) if total_deployed_p > 0 else 0.0
 
             rd1, rd2, rd3, rd4 = st.columns(4)
@@ -2448,11 +2474,11 @@ with tab_perf:
                        f"{port_xirr*100:.2f}%" if port_xirr else "—",
                        help="Annualized return on your actual cashflows, time-discounted. "
                             "Reflects timing skill (or lack thereof).")
-            rd3.metric("Simple return on net cash",
-                       f"{simple_on_net:+.2f}%",
-                       help="Total P&L ÷ net cash invested (deployed − returned). "
-                            "This is what Yahoo Finance's portfolio page shows — your "
-                            "bank-statement view of how much money you've actually made.")
+            rd3.metric("Rendimento (Modified Dietz)",
+                       _son,
+                       help="Total P&L ÷ capitale medio investito: ogni acquisto e vendita "
+                            "pesa per i giorni in cui i soldi sono rimasti investiti, quindi "
+                            "vendere in guadagno non gonfia la %. Stesso numero del riquadro in alto.")
             rd4.metric("Simple return on deployed",
                        f"{simple_on_deployed:+.2f}%",
                        help="Total P&L ÷ gross capital deployed (sum of all buys, ignoring sells).")
@@ -2486,23 +2512,16 @@ with tab_perf:
             # Portfolio return curve vs benchmark — toggleable
             chart_mode = st.radio(
                 "Return measure for chart",
-                ["TWR (time-weighted)", "Simple return on net cash"],
+                ["TWR (time-weighted)", "Rendimento (Modified Dietz)"],
                 horizontal=True, key="perf_chart_mode",
             )
 
-            # Simple-return curve: pnl_t / net_cash_invested_t
-            cum_deposits_curve = cf_series.cumsum()
-            with np.errstate(divide="ignore", invalid="ignore"):
-                simple_curve = (value_series - cum_deposits_curve) / cum_deposits_curve
-            # Mask days where net cash invested ≤ 0 (undefined simple return)
-            simple_curve = simple_curve.where(cum_deposits_curve > 1e-6)
-            # When the History period starts after the first trade, the line above
-            # would open at the since-inception return (e.g. +37%) while the
-            # benchmark opens at 0. Rebase it to the window's first day instead.
+            # Modified Dietz curve since the first trade. When the History period
+            # starts after it, rebase to the window's first day so it opens at 0
+            # like the benchmark.
             win_start = value_series.index[0]
             rebased = tx["trade_date"].min() < win_start
-            if rebased:
-                simple_curve = trend.period_curve(value_series, cf_series, win_start)
+            simple_curve = mt.dietz_curve(value_series, cf_series, win_start if rebased else None)
 
             if chart_mode.startswith("TWR"):
                 port_y = (twr_growth - 1) * 100
@@ -2510,8 +2529,8 @@ with tab_perf:
                 sub = f"TWR vs {benchmark}" if benchmark != "None" else "TWR"
             else:
                 port_y = simple_curve * 100
-                port_label = "Portfolio (simple return on net cash)"
-                sub = f"Simple return vs {benchmark}" if benchmark != "None" else "Simple return"
+                port_label = "Portfolio (rendimento, Modified Dietz)"
+                sub = f"Rendimento vs {benchmark}" if benchmark != "None" else "Rendimento"
 
             st.subheader(sub)
             if rebased and not chart_mode.startswith("TWR"):
@@ -2642,22 +2661,24 @@ with tab_daily:
         else:
             daily_mode = st.radio(
                 "Return measure",
-                ["% sul valore del giorno prima (come Yahoo)", "Simple return on net cash"],
+                ["% sul valore del giorno prima (come Yahoo)", "Rendimento (Modified Dietz)"],
                 horizontal=True, key="daily_mode",
                 help="Il primo divide il P&L del giorno per il valore del portafoglio alla "
-                     "chiusura precedente, come Yahoo e l'Andamento in Home. Il secondo lo "
-                     "divide per il capitale netto versato (acquisti − vendite).",
+                     "chiusura precedente, come Yahoo e l'Andamento in Home. Il secondo "
+                     "aggiunge al denominatore i soldi messi o tolti quel giorno, e sul "
+                     "periodo divide per il capitale medio investito (come il Rendimento in alto).",
             )
+            dietz_mode = daily_mode.startswith("Rendimento")
             daily_dol = mt.daily_dollar_change(value_series, cf_series)
             daily_twr = mt.daily_pct_change(value_series, cf_series)
-            # Simple-return daily %: today's market $ change ÷ net cash invested today.
-            cum_dep_daily = cf_series.cumsum()
+            # Modified Dietz for one day: the day's market P&L ÷ (previous value + money
+            # put in or taken out that day).
+            day_capital = value_series.shift(1).fillna(0.0) + cf_series
             with np.errstate(divide="ignore", invalid="ignore"):
-                daily_simple = daily_dol / cum_dep_daily
-            daily_simple = daily_simple.where(cum_dep_daily > 1e-6, 0.0).fillna(0.0)
+                daily_dietz = (daily_dol / day_capital).where(day_capital > 1e-6, 0.0).fillna(0.0)
 
-            daily_pct = daily_simple if daily_mode.startswith("Simple") else daily_twr
-            pct_label = "Simple % (on net cash)" if daily_mode.startswith("Simple") else "% sul valore"
+            daily_pct = daily_dietz if dietz_mode else daily_twr
+            pct_label = "Rendimento (Dietz)" if dietz_mode else "% sul valore"
 
             n_days = st.slider("Show last N trading days", 5, 90, 30)
             idx = daily_pct.index[-n_days:]
@@ -2671,13 +2692,13 @@ with tab_daily:
 
             # Summary row
             total_dollar = float(df_daily["dollar"].sum())
-            if daily_mode.startswith("Simple"):
-                # Δ in cumulative simple-return over the window
-                cum_pnl = (value_series - cum_dep_daily)
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    cum_simple = (cum_pnl / cum_dep_daily).where(cum_dep_daily > 1e-6)
-                window_growth = float(cum_simple.loc[idx[-1]] - cum_simple.loc[idx[0]])
-                window_label = f"{n_days}d Δ simple return"
+            if dietz_mode:
+                # Modified Dietz over the window, from the close before its first day.
+                _pos = value_series.index.get_loc(idx[0])
+                _base = value_series.index[_pos - 1] if _pos > 0 else None
+                _w = mt.dietz_curve(value_series, cf_series, _base)
+                window_growth = float(_w.iloc[-1]) if len(_w) else 0.0
+                window_label = f"{n_days}d rendimento (Dietz)"
             else:
                 window_growth = (1.0 + daily_twr.loc[idx]).prod() - 1.0
                 window_label = f"{n_days}d rendimento composto"

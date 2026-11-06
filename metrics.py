@@ -301,3 +301,55 @@ def position_contribution(positions: pd.DataFrame) -> pd.DataFrame:
     total = df["total_pnl"].sum()
     df["contribution_pct"] = df["total_pnl"] / total * 100.0 if total else 0.0
     return df.sort_values("total_pnl", ascending=False).reset_index(drop=True)
+
+
+# ----- Modified Dietz ---------------------------------------------------------
+# Cash-flow-aware simple return: P&L ÷ average capital at work. Each flow is
+# weighted by the share of the window it was invested (start-of-day: a flow on
+# day d of a D-day window weighs (D − d + 1) / D). Unlike P&L ÷ net cash
+# (buys − sells), selling at a gain only shrinks the capital for the days after
+# the sale, so the % cannot blow up.
+
+def dietz_curve(values: pd.Series, cashflows: pd.Series, base=None) -> pd.Series:
+    """Modified Dietz return (fraction) from `base` to each later day.
+
+    values / cashflows: daily series (cashflow > 0 = money in, e.g. a buy).
+    base None = from inception: no opening value, every flow counts.
+    Otherwise the window opens at values[base] and only later flows count.
+    The first point is 0; days whose average capital is ≤ 0 are dropped.
+    """
+    if values.empty:
+        return pd.Series(dtype=float)
+    if base is None:
+        t0 = values.index[0] - pd.Timedelta(days=1)
+        v0, idx = 0.0, values.index
+    else:
+        t0, v0 = base, float(values.loc[base])
+        idx = values.index[values.index > base]
+    if len(idx) == 0:
+        return pd.Series([0.0], index=[t0]) if base is not None else pd.Series(dtype=float)
+    cf = cashflows.reindex(idx).fillna(0.0).astype(float)
+    d = pd.Series((idx - t0).days.astype(float), index=idx)   # 1, 2, … days into the window
+    cum_cf = cf.cumsum()
+    cum_cfd = (cf * d).cumsum()
+    capital = v0 + (cum_cf * (d + 1) - cum_cfd) / d
+    pnl = values.reindex(idx) - v0 - cum_cf
+    r = (pnl / capital.where(capital > 1e-9)).dropna()
+    if base is not None:
+        r = pd.concat([pd.Series([0.0], index=[base]), r])
+    return r
+
+
+def dietz_from_flows(flows, end, pnl: float) -> float | None:
+    """Since-inception Modified Dietz from dated flows, without a price history.
+
+    flows: iterable of (date, amount) with amount > 0 for money in (a buy) and
+    < 0 for money out (a sale). end: valuation date. pnl: total P&L at `end`.
+    """
+    flows = [(pd.Timestamp(d).normalize(), float(a)) for d, a in flows if a]
+    if not flows:
+        return None
+    t0 = min(d for d, _ in flows) - pd.Timedelta(days=1)
+    D = max((pd.Timestamp(end).normalize() - t0).days, 1)
+    capital = sum(a * (D - (d - t0).days + 1) / D for d, a in flows)
+    return pnl / capital if capital > 1e-9 else None
