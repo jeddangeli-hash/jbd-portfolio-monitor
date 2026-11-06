@@ -652,7 +652,10 @@ def render_trend(tx_eur: pd.DataFrame, oc: pd.DataFrame, all_pos: pd.DataFrame,
     ui.kpi_grid([
         ui.kpi(f"Rendimento · {trend.PERIOD_LABELS[period]}", ui.pct(ret * 100),
                ("sulla chiusura precedente" if period == "1G"
-                else "sul valore iniziale" if period in trend.INTRADAY else "rendimento (Dietz)"),
+                else "sul valore iniziale" if period in trend.INTRADAY
+                # Dietz: P&L ÷ average capital, so the capital is P&L ÷ return.
+                else f"su capitale medio {ui.money(pnl / ret)}" if abs(ret) > 1e-9
+                else "rendimento (Dietz)"),
                positive=ret >= 0, hero=True),
         ui.kpi("P&L nel periodo", ui.money(pnl), f"in {BASE}", positive=pnl >= 0),
         ui.kpi("Valore attuale", ui.money(float(mv_cls.sum())),
@@ -948,7 +951,7 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
     flows_g = _tx_flows(tx_eur)
     if bond_in and len(tx_eur):
         flows_g.append((tx_eur["trade_date"].min(), sum(b.load_value for b in bond_list) / bond_div))
-    _dz = mt.dietz_from_flows(flows_g, today_, total_pnl_eur)
+    _dz, dietz_cap, dietz_start = mt.dietz_detail(flows_g, today_, total_pnl_eur)
     dietz_ret = _dz * 100.0 if _dz is not None else None
     # Unrealized % on the FIFO cost of the lots still held; realized % on the cost
     # of the shares sold (long-only: sell proceeds − realized P&L).
@@ -1003,7 +1006,8 @@ def render_general(tx_all: pd.DataFrame, classes: list[str],
                if real_pct is not None else "posizioni chiuse",
                positive=total_real_eur >= 0),
         ui.kpi("Rendimento", ui.pct(dietz_ret) if dietz_ret is not None else "n/a",
-               "P&L ÷ capitale medio investito (Dietz)",
+               (f"{ui.money(total_pnl_eur)} ÷ capitale medio {ui.money(dietz_cap)} · "
+                f"dal {dietz_start:%d/%m/%Y}") if dietz_cap else "P&L ÷ capitale medio investito",
                positive=(dietz_ret >= 0) if dietz_ret is not None else None),
         ui.kpi("XIRR (MWR)", ui.pct(agg_xirr * 100) if agg_xirr else "n/a",
                "money-weighted, annuo",
@@ -1631,7 +1635,7 @@ _deployed_o = float((_buy_o["qty"] * _buy_o["price"]).sum())
 _returned_o = float((_sell_o["qty"] * _sell_o["price"]).sum())
 _net_cash_o = _deployed_o - _returned_o
 # Headline return: Modified Dietz since the first trade (see the Generale view).
-_dz_o = mt.dietz_from_flows(_tx_flows(tx), today, total_pnl_all)
+_dz_o, _dz_cap_o, _dz_start_o = mt.dietz_detail(_tx_flows(tx), today, total_pnl_all)
 simple_on_net_o = _dz_o * 100.0 if _dz_o is not None else None
 _cost_of_sold_o = _returned_o - total_realized
 realized_ret_o = (total_realized / _cost_of_sold_o * 100.0) if _cost_of_sold_o > 1e-9 else None
@@ -1648,7 +1652,9 @@ ui.kpi_grid([
     ui.kpi("Realized P&L", ui.money(total_realized, CS),
            f"Realized {_rr}" if realized_ret_o is not None else "da lotti chiusi",
            positive=(realized_ret_o >= 0) if realized_ret_o is not None else None),
-    ui.kpi("Total P&L", ui.money(total_pnl_all, CS), f"{_son} rendimento",
+    ui.kpi("Total P&L", ui.money(total_pnl_all, CS),
+           f"{_son} rendimento · capitale medio {ui.money(_dz_cap_o, CS)} dal {_dz_start_o:%d/%m/%Y}"
+           if _dz_cap_o else f"{_son} rendimento",
            positive=(simple_on_net_o >= 0) if simple_on_net_o is not None else None),
     ui.kpi("XIRR (MWR)", ui.pct(port_xirr * 100) if port_xirr else "n/a",
            "money-weighted, annuo", positive=(port_xirr or 0) >= 0),
